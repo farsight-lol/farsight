@@ -1,0 +1,40 @@
+[package]
+name = "farsight"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+aya = { git = "https://github.com/aya-rs/aya", features = ["async_tokio"] }
+aya-log = { git = "https://github.com/aya-rs/aya" }
+farsight-common = { path = "../farsight-common", features = ["user"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+libc = "0.2"
+bitflags = "2"
+anyhow = "1"
+log = "0.4"
+# i wish you weren't required for absolutely no reason at all for this project
+# fuck you aya-rs
+tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal", "sync", "time"] }
+perfect_rand = "0.3"
+env_logger = "0.11"
+rand = "0.9"
+rand_xorshift = "0.4.0"
+strength_reduce = "0.2"
+ttlhashmap = "0.1"
+serde_with = "3"
+crossbeam-queue = "0.3"
+enum-map = "2"
+mongodb = { version = "3", features = ["sync"] }
+enum_dispatch = "0.3"
+
+[build-dependencies]
+aya-build = { git = "https://github.com/aya-rs/aya" }
+anyhow = "1"
+farsight-ebpf = { path = "../farsight-ebpf" }
+
+[[bin]]
+name = "farsight"
+path = "src/main.rs"

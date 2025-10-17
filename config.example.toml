@@ -1,0 +1,63 @@
+# why mongo? scalability and ease of use
+# performance? fucking sucks
+# eats ram? yes
+# but it's easy. get over it
+
+[mongo]
+# the connection url/string
+url = "REPLACE-ME"
+
+# the name of the database :3
+database = "REPLACE-ME"
+
+# which collection to save the information that is collected
+# from the specified parser
+collections = [
+    { parser = "slp", collection = "REPLACE-ME" }
+]
+
+[strategy]
+# (1 - epsilon) * 100 gives you the percentage chance of
+# exploitation (using data from the database to generated ranges) being done
+# and epsilon * 100 gives you the percentage chance of exploration being done
+# so epsilon = 0.01 gives a 1% chance of exploration, and a 99% chance of exploitation
+epsilon = 0.01
+
+[controller]
+# the port range which we will scan from
+source_port_range = [42000, 43000]
+
+# the interface that the XDP program will attach to
+# commands like "ip addr" help find the right interface
+# hint: it probably isnt "lo"
+interface = "REPLACE-ME"
+
+# per how many seconds the pps info gets printed
+print_every = 5
+
+[session]
+# how much each scan session lasts, in seconds
+duration = 300
+
+[ping]
+# after how much seconds the connection will be dropped if there is no response
+# lower = more memory efficient but more misses
+timeout = 30
+
+# config for the slp parser
+slp = { host = "farsight", port = 1337, protocol_version = 47 }
+
+[xdp]
+# use either "copy" or "zero-copy" to force a mode.
+# use "fallback" for the program to decide the best option.
+mode = "fallback"
+
+# use either "driver", "hardware" or "skb" to force an attach mode.
+# hardware = fastest, if the NIC itself has hardware support for af_xdp
+# driver = faster, if the NIC driver has support for af_xdp
+# skb = slow, basically emulating af_xdp. always usable
+attach_mode = "driver"
+
+# ring sizes, you generally don't want to change this one either
+# farsight will allocate 2 * ring_size frames for the umem where each frame is 2048 bytes (4096 * ring_size bytes total)
+ring_size = 2048

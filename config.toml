@@ -1,0 +1,53 @@
+# why mongo? scalability and ease of use
+# performance? fucking sucks
+# eats ram? yes
+# but it's easy. get over it
+
+[mongo]
+# the connection url/string
+url = "REPLACE-ME"
+
+# the name of the database :3
+database = "REPLACE-ME"
+
+# which collection to save the information that is collected
+# from the specified parser
+collections = [
+    { parser = "slp", collection = "REPLACE-ME" }
+]
+
+[controller]
+# the port range which we will scan from
+source_port_range = [42000, 43000]
+
+# the interface that the XDP program will attach to
+# commands like "ip addr" help find the right interface
+# hint: it probably isnt "lo"
+interface = "enp1s0"
+
+# per how many seconds the pps info gets printed
+print_every = 5
+
+[session]
+# how much each scan session lasts, in seconds
+duration = 300
+
+[ping]
+# after how much seconds the connection will be dropped if there is no response
+# lower = more memory efficient but more misses
+timeout = 30
+
+# config for the slp parser
+slp = { host = "farsight", port = 1337, protocol_version = 47 }
+
+[xdp]
+# use either "copy" or "zero-copy" to force a mode.
+# use "fallback" for the program to decide the best option.
+mode = "copy"
+
+# use either "driver", "hardware" or "skb" to force an attach mode.
+attach_mode = "driver"
+
+# ring sizes, you generally don't want to change this one either
+# farsight will allocate 2 * ring_size frames for the umem where each frame is 2048 bytes
+ring_size = 2048

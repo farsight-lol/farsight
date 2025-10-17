@@ -1,0 +1,15 @@
+[package]
+name = "farsight-common"
+version = "0.0.1"
+edition = "2024"
+
+[features]
+default = []
+user = ["aya"]
+
+[dependencies]
+aya = { git = "https://github.com/aya-rs/aya", optional = true }
+network-types = "0.0.8"
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,17 @@
+[package]
+name = "farsight-ebpf"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = { git = "https://github.com/aya-rs/aya" }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
+network-types = "0.0.8"
+farsight-common = { path = "../farsight-common" }
+
+[build-dependencies]
+which = { version = "8.0.0", default-features = false, features = ["real-sys"] }
+
+[[bin]]
+name = "farsight-xdp"
+path = "src/xdp.rs"

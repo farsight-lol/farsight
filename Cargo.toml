@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "farsight",
+    "farsight-common",
+    "farsight-ebpf"
+]
+default-members = ["farsight", "farsight-common"]
+
+[profile.release.package.farsight-ebpf]
+debug = 2
+codegen-units = 1
