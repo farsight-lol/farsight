@@ -42,7 +42,7 @@ pub static TCP_PACKET: [u8; 62] = [
     0x00,
     0x00, // [dst port] : [34..36]
     0x00,
-    0x00, // [dst port] : [36..38]
+    0x00, // [src port] : [36..38]
     0x00,
     0x00,
     0x00,
@@ -69,6 +69,27 @@ pub static TCP_PACKET: [u8; 62] = [
     0x04,
     0x02, // sack-perm
 ];
+
+// minimal (with some fields hidden) struct for writing fields the packet above
+// since apparently it's faster than direct byte writes
+#[repr(C, packed)]
+pub struct EthTcpIpHdr {
+    _padding_0: [u8; 16],
+    pub len: u16,
+    _padding_1: [u8; 6],
+    pub ip_checksum: u16,
+    _padding_2: [u8; 4],
+    pub dest_addr: Ipv4Addr,
+
+    pub source_port: u16,
+    pub dest_port: u16,
+    pub seq: u32,
+    pub ack: u32,
+    _padding_3: u8,
+    pub flags: u8,
+    _padding_4: [u8; 2],
+    pub tcp_checksum: u16,
+}
 
 bitflags! {
     #[derive(PartialEq, Debug)]
@@ -107,55 +128,22 @@ pub const fn ipv4_sum(ip: &[u8; 4]) -> u32 {
 }
 
 #[inline(always)]
-pub const fn raw_partial(ipv4_sum: u32, len: usize) -> u16 {
-    finalize_partial(ipv4_sum + 6 + len as u32)
+pub const fn fold(sum: u32) -> u16 {
+    let sum = (sum >> 16) + (sum & 0xffff);
+    (sum + (sum >> 16)) as u16
 }
 
-#[inline(always)]
-const fn tcp_sum(data: &[u8]) -> u32 {
-    // gets optimized to SIMD instructions :)
-    let len = data.len();
-    let data_ptr = data.as_ptr();
-
+#[inline]
+pub fn sum_body(data: &[u8]) -> u32 {
     let mut sum = 0u32;
-    let mut i = 0;
-    while (i * 2) + 1 < len {
-        sum += u16::from_be(unsafe {
-            std::ptr::read_unaligned(data_ptr.add(i * 2).cast())
-        }) as u32;
-
-        i += 1;
+    let mut chunks = data.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
     }
 
-    if len & 1 != 0 {
-        sum += unsafe { (*(data_ptr.add(len - 1))) as u32 } << 8;
+    if let [last] = chunks.remainder() {
+        sum += (*last as u32) << 8;
     }
 
     sum
-}
-
-#[inline(always)]
-pub const fn tcp(
-    data: &[u8],
-    source: &Ipv4Addr,
-    destination: &Ipv4Addr,
-) -> u16 {
-    finalize_checksum(
-        ipv4_sum(source.as_octets())
-            + ipv4_sum(destination.as_octets())
-            + 6
-            + data.len() as u32
-            + tcp_sum(data),
-    )
-}
-
-#[inline(always)]
-pub const fn finalize_checksum(sum: u32) -> u16 {
-    !finalize_partial(sum)
-}
-
-#[inline(always)]
-pub const fn finalize_partial(sum: u32) -> u16 {
-    let sum = (sum >> 16) + (sum & 0xffff);
-    (sum + (sum >> 16)) as u16
 }

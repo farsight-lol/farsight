@@ -1,7 +1,7 @@
 use anyhow::Error;
-use std::{borrow::Cow, net::Ipv4Addr, ops::Deref};
 use serde::Serialize;
-use crate::config::ParserKind;
+use std::{net::Ipv4Addr, ops::Deref};
+use std::fmt::Debug;
 
 pub mod minecraft;
 
@@ -11,11 +11,9 @@ pub enum ParseError {
     Incomplete,
 }
 
-pub trait Parser: Send + Sync {
-    const KIND: ParserKind;
-    
-    type Output: Sized + Send + Sync + Serialize;
-    
+pub trait Parser: Send + Sync + Debug {
+    type Output: Sized + Send + Sync + Serialize + Debug;
+
     fn parse(
         &'_ self,
         ip: Ipv4Addr,

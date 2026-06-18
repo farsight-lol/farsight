@@ -1,29 +1,34 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use log::info;
+use log::{info, trace};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
 
 pub(super) struct Printer<'b> {
     completed: &'b AtomicUsize,
 
     print_every: Duration,
-    
+
     last: Instant,
-    last_comp: usize
+    last_comp: usize,
 }
 
 impl<'b> Printer<'b> {
     #[inline]
-    pub(super) fn new(completed: &'b AtomicUsize, print_every: Duration) -> Self {
+    pub(super) fn new(
+        completed: &'b AtomicUsize,
+        print_every: Duration,
+    ) -> Self {
         Self {
             completed,
 
             print_every,
-            
+
             last: Instant::now(),
-            last_comp: 0
+            last_comp: 0,
         }
     }
-    
+
     #[inline]
     pub(super) fn tick(&mut self) {
         let elapsed = self.last.elapsed();
@@ -31,7 +36,7 @@ impl<'b> Printer<'b> {
             return;
         }
 
-        let comp = self.completed.load(Ordering::Acquire);
+        let comp = self.completed.load(Ordering::Relaxed);
         let pps = (comp - self.last_comp) as f64 / elapsed.as_secs_f64();
 
         if pps > 10_000_000. {
@@ -41,6 +46,8 @@ impl<'b> Printer<'b> {
         } else {
             info!("{} pps", pps.round() as u64)
         };
+
+        trace!("total completed: {comp}");
 
         self.last_comp = comp;
         self.last = Instant::now();

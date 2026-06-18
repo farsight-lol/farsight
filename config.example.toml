@@ -1,42 +1,35 @@
-# why mongo? scalability and ease of use
-# performance? fucking sucks
-# eats ram? yes
-# but it's easy. get over it
-
-[mongo]
-# the connection url/string
-url = "REPLACE-ME"
-
-# the name of the database :3
-database = "REPLACE-ME"
-
-# which collection to save the information that is collected
-# from the specified parser
-collections = [
-    { parser = "slp", collection = "REPLACE-ME" }
-]
-
-[strategy]
-# (1 - epsilon) * 100 gives you the percentage chance of
-# exploitation (using data from the database to generated ranges) being done
-# and epsilon * 100 gives you the percentage chance of exploration being done
-# so epsilon = 0.01 gives a 1% chance of exploration, and a 99% chance of exploitation
-epsilon = 0.01
+[database]
+# todo
 
 [controller]
 # the port range which we will scan from
+# to prohibit the kernel from closing the connections
+# run the following:
+# ```
+# sudo nft add table inet filter
+# sudo nft add chain inet filter output '{ type filter hook output priority 0; policy accept; }'
+# sudo nft add rule inet filter output ip protocol tcp tcp flags rst tcp sport <port_range_start>-<port_range_end> drop
+# ```
+# and to make it persistent, run the following:
+# ```
+# sudo nft list ruleset | sudo tee /etc/nftables.conf
+# sudo systemctl enable --now nftables
+# ```
 source_port_range = [42000, 43000]
 
-# the interface that the XDP program will attach to
-# commands like "ip addr" help find the right interface
+# the interface that the program will attach to
+# commands like "ip addr" or "nmcli d" help find the right interface
 # hint: it probably isnt "lo"
 interface = "REPLACE-ME"
 
 # per how many seconds the pps info gets printed
 print_every = 5
 
+# how many packets per second at max we're willing to send
+max_rate = 300_000
+
 [session]
-# how much each scan session lasts, in seconds
+# how much each scan session lasts at max, in seconds
 duration = 300
 
 [ping]
@@ -49,15 +42,25 @@ slp = { host = "farsight", port = 1337, protocol_version = 47 }
 
 [xdp]
 # use either "copy" or "zero-copy" to force a mode.
-# use "fallback" for the program to decide the best option.
-mode = "fallback"
+# "zero-copy" = fastest, may not be as stable in every driver
+# "copy" = fast
+# "fallback" = ?, chooses whatever the driver thinks is best
+mode = "copy"
 
-# use either "driver", "hardware" or "skb" to force an attach mode.
-# hardware = fastest, if the NIC itself has hardware support for af_xdp
-# driver = faster, if the NIC driver has support for af_xdp
-# skb = slow, basically emulating af_xdp. always usable
-attach_mode = "driver"
+# use either "driver", "hardware" or "skb" to force an "attach mode".
+# hardware = fastest, usable if the NIC hardware has support for af_xdp
+# driver = faster, usable if the NIC driver has support for af_xdp
+# skb = fast, basically emulating af_xdp via the kernel. always usable
+attach_mode = "skb"
 
-# ring sizes, you generally don't want to change this one either
-# farsight will allocate 2 * ring_size frames for the umem where each frame is 2048 bytes (4096 * ring_size bytes total)
+# TCP packets require a checksum for whatever reason, and to compute them is expensive.
+# offloading them to the NIC however makes things go fast
+# but not every driver may support this with zero-copy simultaneously.
+# if you get no throughput with zero-copy, it's probably because of this being true.
+# true = fastest, may not be as stable in every driver when coupled with zero-copy
+# false = fast
+checksum_offload = false
+
+# ring sizes, change only if you know what you're doing.
+# higher values may increase memory usage but it also may improve performance
 ring_size = 2048

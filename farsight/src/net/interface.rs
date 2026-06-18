@@ -6,13 +6,8 @@ use libc::{
     strlen, AF_INET,
 };
 use std::{
-    ffi::CString,
-    fs::read_to_string,
-    io,
-    marker::PhantomData,
-    mem,
-    mem::MaybeUninit,
-    net::Ipv4Addr,
+    ffi::CString, fs::read_to_string, io, marker::PhantomData, mem,
+    mem::MaybeUninit, net::Ipv4Addr,
 };
 
 #[derive(Debug)]

@@ -40,7 +40,7 @@ pub struct InterfaceInfoGuard {
 impl InterfaceInfoGuard {
     #[inline]
     pub fn new(dev: &str) -> Result<Self, anyhow::Error> {
-        if dev.len() > IFNAMSIZ {
+        if dev.len() > IFNAMSIZ - 1 {
             bail!("interface name is too long")
         }
 

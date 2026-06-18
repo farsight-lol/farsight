@@ -4,13 +4,7 @@ use crate::{
 };
 use anyhow::Context;
 use bitflags::bitflags;
-use libc::{
-    bind, getsockopt, recvfrom, sendto, setsockopt,
-    sockaddr_xdp, socket, AF_XDP, MSG_DONTWAIT, PF_XDP, SOCK_CLOEXEC,
-    SOCK_RAW, SOL_SOCKET, SOL_XDP, SO_BUSY_POLL,
-    SO_BUSY_POLL_BUDGET, SO_PREFER_BUSY_POLL, XDP_COPY, XDP_SHARED_UMEM, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP,
-    XDP_USE_SG, XDP_ZEROCOPY,
-};
+use libc::{bind, getsockopt, recvfrom, sendto, setsockopt, sockaddr_xdp, socket, AF_XDP, MSG_DONTWAIT, PF_XDP, SOCK_CLOEXEC, SOCK_RAW, SOL_SOCKET, SOL_XDP, SO_BUSY_POLL, SO_BUSY_POLL_BUDGET, SO_PREFER_BUSY_POLL, XDP_COPY, XDP_SHARED_UMEM, XDP_STATISTICS, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP, XDP_USE_SG, XDP_ZEROCOPY};
 use std::{
     io::Error,
     mem::MaybeUninit,
@@ -20,6 +14,7 @@ use std::{
 };
 
 bitflags! {
+    #[derive(Clone)]
     pub struct BindFlags: u16 {
         const NeedWakeup = XDP_USE_NEED_WAKEUP;
         const ZeroCopy = XDP_ZEROCOPY;
@@ -27,6 +22,17 @@ bitflags! {
         const SharedUmem = XDP_SHARED_UMEM;
         const UseSg = XDP_USE_SG;
     }
+}
+
+#[repr(C)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Statistics {
+    pub rx_dropped: u64, // dropped for reasons other than invalid desc
+    pub rx_invalid_descs: u64, // dropped due to invalid desc
+    pub tx_invalid_descs: u64, // dropped due to invalid desc
+    pub rx_ring_full: u64,
+    pub rx_fill_ring_empty_descs: u64,
+    pub tx_ring_empty_descs: u64,
 }
 
 #[repr(transparent)]
@@ -100,8 +106,13 @@ impl Socket {
     }
 
     #[inline]
-    pub fn rings(&'_ self) -> Result<RingAllocator<'_>, anyhow::Error> {
-        RingAllocator::new(self)
+    pub fn rings(&self) -> Result<RingAllocator, anyhow::Error> {
+        RingAllocator::new(self.clone())
+    }
+
+    #[inline]
+    pub fn statistics(&self) -> Result<Statistics, Error> {
+        self.get_opt(SOL_XDP, XDP_STATISTICS)
     }
 
     #[inline]

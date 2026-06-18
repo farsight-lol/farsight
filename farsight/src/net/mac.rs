@@ -24,11 +24,13 @@ impl MacAddr {
         }
 
         let mut mac = [0u8; 6];
-        for (i, o) in s.split(":").enumerate() {
-            if i >= 6 {
-                bail!("invalid MAC address segment count");
-            }
 
+        let segments: Vec<_> = s.split(":").collect();
+        if segments.len() != 6 {
+            bail!("invalid MAC segment count: {}", s.len());
+        }
+
+        for (i, o) in segments.into_iter().enumerate() {
             mac[i] = u8::from_str_radix(o, 16)?;
         }
 

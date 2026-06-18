@@ -6,11 +6,9 @@ use std::{fs, net::Ipv4Addr, str::FromStr};
 
 #[inline]
 pub fn load(input: &str) -> anyhow::Result<Ipv4Ranges> {
-    let input = fs::read_to_string(input)
-        .context("reading file")?;
+    let input = fs::read_to_string(input).context("reading file")?;
 
-    parse(&input)
-        .context("parsing file")
+    parse(&input).context("parsing file")
 }
 
 fn parse(input: &str) -> anyhow::Result<Ipv4Ranges> {
@@ -44,7 +42,7 @@ fn parse(input: &str) -> anyhow::Result<Ipv4Ranges> {
             let ip_u32 = u32::from(Ipv4Addr::from_str(ip)?);
 
             Ipv4Addr::from(ip_u32 & !mask_bits)
-                ..Ipv4Addr::from(ip_u32 | mask_bits)
+                ..=Ipv4Addr::from(ip_u32 | mask_bits)
         } else if is_hypen {
             let mut parts = line.split('-');
 
@@ -60,11 +58,11 @@ fn parse(input: &str) -> anyhow::Result<Ipv4Ranges> {
                 )
             }
 
-            ip_start..ip_end
+            ip_start..=ip_end
         } else {
             let ip = Ipv4Addr::from_str(line)?;
 
-            ip..ip
+            ip..=ip
         };
 
         ranges.push(range);

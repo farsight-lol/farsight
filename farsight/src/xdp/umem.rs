@@ -1,8 +1,13 @@
+use crate::xdp::ring::Descriptor;
 use anyhow::{bail, Context};
 use libc::{xsk_tx_metadata, XDP_UMEM_TX_METADATA_LEN};
-use std::alloc::{alloc_zeroed, dealloc, Layout};
-
-pub const TX_METADATA_LEN: usize = size_of::<xsk_tx_metadata>();
+use std::{
+    alloc::{alloc_zeroed, dealloc, Layout},
+    slice::from_raw_parts_mut,
+};
+use log::info;
+use crate::xdp::socket::Socket;
+use crate::xdp::tx_metadata::TxMetadata;
 
 pub struct Umem {
     area: *mut u8,
@@ -23,9 +28,10 @@ impl Umem {
         frame_size: u32,
         frame_count: u32,
     ) -> Result<Self, anyhow::Error> {
-        let layout =
-            Layout::from_size_align((frame_size * frame_count) as usize, 16384)
-                .context("creating umem layout")?;
+        let layout = Layout::from_size_align(
+            frame_size.saturating_mul(frame_count) as usize,
+            16384,
+        ).context("creating umem layout")?;
 
         let area = unsafe { alloc_zeroed(layout) };
         if area.is_null() {
@@ -41,13 +47,19 @@ impl Umem {
     }
 
     #[inline]
-    pub fn as_ptr(&self) -> *mut u8 {
-        self.area
+    #[allow(clippy::mut_from_ref)] // guaranteed by our rings that aliasing is impossible
+    pub fn of_desc(&self, desc: &Descriptor) -> &mut [u8] {
+        unsafe {
+            from_raw_parts_mut(
+                self.area.add(desc.addr as usize),
+                self.frame_size as usize,
+            )
+        }
     }
 
     #[inline]
-    pub fn size(&self) -> usize {
-        self.layout.size()
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.area
     }
 
     #[inline]
@@ -63,8 +75,23 @@ impl Umem {
             frame_size: self.frame_size,
             headroom: 0,
             flags: XDP_UMEM_TX_METADATA_LEN,
-            tx_metadata_len: TX_METADATA_LEN as u32,
+            tx_metadata_len: TxMetadata::LEN as u32,
         }
+    }
+
+    #[inline]
+    pub fn bind(&self, socket: Socket) -> anyhow::Result<()> {
+        let mut reg = self.as_reg();
+        socket.set_umem_reg(&reg)
+            .or_else(|_| {
+                info!("error setting umem reg, retrying - this may occur with some kernels");
+
+                reg.remove_flags();
+                socket.set_umem_reg(&reg)
+            })
+            .context("setting umem reg")?;
+
+        Ok(())
     }
 }
 

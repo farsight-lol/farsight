@@ -6,6 +6,7 @@
       <sourceFolder url="file://$MODULE_DIR$/farsight-ebpf/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/farsight/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/farsight-sk-ebpf/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/farsight/benches" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

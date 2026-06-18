@@ -9,6 +9,7 @@ pub struct TxMetadataCompletion {
 pub struct TxMetadataRequest {
     pub csum_start: u16,
     pub csum_offset: u16,
+    pub launch_time: u64
 }
 
 #[repr(C)]
@@ -24,6 +25,8 @@ pub struct TxMetadata {
 }
 
 impl TxMetadata {
+    pub const LEN: usize = size_of::<Self>();
+
     #[inline]
     pub const fn completion(flags: u64, timestamp: u64) -> Self {
         Self {
@@ -39,6 +42,7 @@ impl TxMetadata {
         flags: u64,
         csum_start: u16,
         csum_offset: u16,
+        launch_time: u64
     ) -> Self {
         Self {
             flags,
@@ -46,6 +50,7 @@ impl TxMetadata {
                 request: TxMetadataRequest {
                     csum_start,
                     csum_offset,
+                    launch_time
                 },
             },
         }

@@ -4,14 +4,11 @@ use aya::programs::XdpFlags;
 use serde::Deserialize;
 use serde_with::{serde_as, DurationSeconds};
 use std::{fs::read_to_string, time::Duration};
-use std::collections::BTreeMap;
-use enum_map::Enum;
 
 #[derive(Deserialize)]
 pub struct Config {
     pub controller: ControllerConfig,
-    pub mongo: MongoConfig,
-    pub strategy: StrategyConfig,
+    pub database: DatabaseConfig,
     pub session: SessionConfig,
     pub ping: PingConfig,
     pub xdp: XdpConfig,
@@ -23,32 +20,15 @@ pub struct ControllerConfig {
     pub source_port_range: [u16; 2],
     pub interface: String,
 
+    pub max_rate: u64,
+
     #[serde_as(as = "DurationSeconds<u64>")]
-    pub print_every: Duration,
+    pub print_every: Duration
 }
 
 #[derive(Deserialize)]
-pub struct MongoConfig {
-    pub url: String,
-    pub database: String,
-    pub collections: Vec<CollectionConfig>
-}
-
-#[derive(Deserialize)]
-pub struct StrategyConfig {
-    pub epsilon: f64
-}
-
-#[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Enum, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ParserKind {
-    Slp
-}
-
-#[derive(Deserialize)]
-pub struct CollectionConfig {
-    pub parser: ParserKind,
-    pub collection: String
+pub struct DatabaseConfig {
+    // todo
 }
 
 #[serde_as]
@@ -118,6 +98,7 @@ impl XdpAttachMode {
 pub struct XdpConfig {
     pub mode: XdpMode,
     pub attach_mode: XdpAttachMode,
+    pub checksum_offload: bool,
 
     pub ring_size: u32,
 }

@@ -1,5 +1,4 @@
-use crate::controller::strategy::Strategy;
-use crate::net::range::Ranges;
+use crate::{controller::strategy::Strategy, net::range::Ranges};
 
 #[derive(Debug)]
 pub struct OnePort(u16);
@@ -16,6 +15,6 @@ impl Strategy for OnePort {
 
     #[inline]
     fn generate_ranges(&self) -> anyhow::Result<Ranges<Self::Output>> {
-        Ok((self.0..self.0).into())
+        Ok((self.0..=self.0).into())
     }
 }

@@ -6,8 +6,7 @@ use libc::{
     MAP_POPULATE, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE,
     SOL_XDP, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING,
     XDP_RING_NEED_WAKEUP, XDP_RX_RING, XDP_TX_RING,
-    XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING, XDP_UMEM_PGOFF_COMPLETION_RING,
-    XDP_UMEM_PGOFF_FILL_RING,
+    XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING, XDP_UMEM_PGOFF_COMPLETION_RING, XDP_UMEM_PGOFF_FILL_RING,
 };
 use std::{
     ops::{Deref, DerefMut, Index, IndexMut},
@@ -104,13 +103,13 @@ impl RingKind {
     }
 }
 
-pub struct RingAllocator<'b> {
-    socket: &'b Socket,
+pub struct RingAllocator {
+    socket: Socket,
     offsets: MmapOffsets,
 }
 
-impl<'b> RingAllocator<'b> {
-    pub(super) fn new(socket: &'b Socket) -> Result<Self, anyhow::Error> {
+impl RingAllocator {
+    pub(super) fn new(socket: Socket) -> Result<Self, anyhow::Error> {
         let offsets = socket
             .get_opt(SOL_XDP, XDP_MMAP_OFFSETS)
             .context("getting mmap offsets")?;
@@ -157,7 +156,7 @@ pub struct RingFlags(NonNull<u32>);
 impl RingFlags {
     #[inline]
     pub fn needs_wakeup(&self) -> bool {
-        (load_u32(self.0, Ordering::Relaxed) & XDP_RING_NEED_WAKEUP) != 0
+        (load_u32(self.0, Ordering::Acquire) & XDP_RING_NEED_WAKEUP) != 0
     }
 }
 
@@ -377,7 +376,7 @@ impl<T> Consumer<T> {
     #[inline]
     pub fn available(&mut self, batch_size: u32) -> u32 {
         let mut entries = self.0.cached_prod - self.0.cached_cons;
-        if entries == 0 {
+        if entries < batch_size {
             self.0.cached_prod = load_u32(self.0.prod, Ordering::Acquire);
             entries = self.0.cached_prod - self.0.cached_cons;
         }
@@ -386,16 +385,16 @@ impl<T> Consumer<T> {
     }
 
     #[inline]
-    pub fn peek(&mut self, batch_size: u32) -> Option<u32> {
+    pub fn peek(&mut self, batch_size: u32) -> Option<(u32, u32)> {
         let entries = self.available(batch_size);
-        if entries > 0 {
-            let index = self.0.cached_cons;
-            self.0.cached_cons += entries;
-
-            return Some(index);
+        if entries == 0 {
+            return None;
         }
 
-        None
+        let index = self.0.cached_cons;
+        self.0.cached_cons += entries;
+
+        Some((index, entries))
     }
 
     #[inline]

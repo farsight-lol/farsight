@@ -1,19 +1,16 @@
-use crate::controller::protocol::{Parser, ParseError};
+use crate::{
+    controller::protocol::{ParseError, Parser},
+};
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Cow
-    ,
     io::{Cursor, Read, Write},
     net::Ipv4Addr,
 };
-use crate::config::ParserKind;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct SLPParser;
 
 impl Parser for SLPParser {
-    const KIND: ParserKind = ParserKind::Slp;
-
     type Output = SLPResponse;
 
     #[inline]
@@ -25,8 +22,7 @@ impl Parser for SLPParser {
     ) -> Result<Self::Output, ParseError> {
         let mut stream = Cursor::new(data);
 
-        // ignore packet length
-        read_varint(&mut stream)?;
+        _ = read_varint(&mut stream)?; // packet length
 
         let packet_id = read_varint(&mut stream)?;
         let response_length = read_varint(&mut stream)?;
@@ -43,9 +39,7 @@ impl Parser for SLPParser {
         }
 
         match serde_json::from_slice(status_buffer) {
-            Ok(value) => {
-                Ok(value)
-            }
+            Ok(value) => Ok(value),
 
             Err(_) => Err(ParseError::Invalid),
         }
@@ -75,6 +69,7 @@ pub fn build_latest_request(
         (port & 0b1111_1111) as u8, // server port as unsigned short
         0x01,                       // next state: 1 (status) as VarInt
     ]);
+
     // buffer for the 1st and 2nd packet
     let mut full_buffer = vec![];
     write_varint(&mut full_buffer, buffer.len() as i32); // length of 1st packet id + data as VarInt

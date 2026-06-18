@@ -28,7 +28,7 @@ pub fn farsight_xdp(ctx: XdpContext) -> u32 {
     unsafe { try_farsight_xdp(&ctx) }.unwrap_or_else(|()| {
         error!(&ctx, "aborting program...");
 
-        XDP_ABORTED
+        XDP_PASS
     })
 }
 
@@ -60,7 +60,13 @@ unsafe fn try_farsight_xdp(ctx: &XdpContext) -> Result<u32, ()> {
         return Ok(XDP_PASS);
     }
 
-    let tcphdr = ptr_at::<TcpHdr>(ctx, EthHdr::LEN + 4 * unsafe { (*ipv4hdr).ihl() } as usize)?;
+    let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
+    if ihl < 5 {
+        // invalid IHL
+        return Ok(XDP_PASS);
+    }
+
+    let tcphdr = ptr_at::<TcpHdr>(ctx, EthHdr::LEN + 4 * ihl)?;
     let dest = unsafe { (*tcphdr).dest };
 
     if dest < source_port_start || dest > source_port_end {

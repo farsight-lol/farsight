@@ -1,5 +1,4 @@
-use crate::controller::strategy::Strategy;
-use crate::net::range::Ranges;
+use crate::{controller::strategy::Strategy, net::range::Ranges};
 
 #[derive(Default, Debug)]
 pub struct RangedPorts(u16, u16);
@@ -16,6 +15,6 @@ impl Strategy for RangedPorts {
 
     #[inline]
     fn generate_ranges(&self) -> anyhow::Result<Ranges<Self::Output>> {
-        Ok((self.0..self.1).into())
+        Ok((self.0..=self.1).into())
     }
 }
