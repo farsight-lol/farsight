@@ -4,15 +4,14 @@ use std::{
     ,
     range::RangeInclusive,
 };
+use std::collections::HashSet;
+use std::hash::Hash;
 use strength_reduce::StrengthReducedUsize;
 
-pub type Address = (Ipv4Addr, u16);
-pub type CompiledRanges = Ranges<Address, CompilationInfo, usize>;
-pub type AddressRanges = Ranges<Address>;
+pub type CompiledRanges = Ranges<Ipv4Addr, CompilationInfo, usize>;
 pub type Ipv4Ranges = Ranges<Ipv4Addr>;
 
 pub struct CompilationInfo {
-    port_count: StrengthReducedUsize,
     index: usize,
     count: usize,
 }
@@ -27,6 +26,23 @@ impl<T, E, C> Ranges<T, E, C> {
     #[inline]
     pub fn into_inner(self) -> Vec<(RangeInclusive<T>, E)> {
         self.inner
+    }
+}
+
+impl<T> From<Vec<T>> for Ranges<T, (), ()> where T: Hash + Eq + Clone {
+    #[inline]
+    fn from(value: Vec<T>) -> Self {
+        Self {
+            inner: value.into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(|t| (RangeInclusive {
+                    start: t.clone(),
+                    last: t
+                }, ()))
+                .collect(),
+            count: (),
+        }
     }
 }
 
@@ -53,7 +69,7 @@ impl<T> From<Vec<std::ops::RangeInclusive<T>>> for Ranges<T, (), ()> {
     }
 }
 
-impl AddressRanges {
+impl Ipv4Ranges {
     #[inline]
     pub fn exclude(&mut self, exclude_ranges: &Ipv4Ranges) {
         let mut exclude_ranges = exclude_ranges.inner.iter();
@@ -69,14 +85,14 @@ impl AddressRanges {
         };
 
         loop {
-            if scan_range.last.0 < exclude_range.start {
+            if scan_range.last < exclude_range.start {
                 self.inner.push((scan_range, ()));
 
                 match scan_ranges.next() {
                     Some((new_range, _)) => scan_range = new_range,
                     None => break,
                 };
-            } else if scan_range.start.0 > exclude_range.last {
+            } else if scan_range.start > exclude_range.last {
                 match exclude_ranges.next() {
                     Some((new_range, _)) => exclude_range = new_range,
                     None => {
@@ -84,28 +100,22 @@ impl AddressRanges {
                         break;
                     }
                 };
-            } else if scan_range.start.0 < exclude_range.start
-                && scan_range.last.0 > exclude_range.last
+            } else if scan_range.start < exclude_range.start
+                && scan_range.last > exclude_range.last
             {
                 let new_range = RangeInclusive {
                     start: scan_range.start,
-                    last: (
-                        Ipv4Addr::from(exclude_range.start.to_bits() - 1),
-                        scan_range.last.1,
-                    ),
+                    last: Ipv4Addr::from(exclude_range.start.to_bits() - 1),
                 };
 
                 self.inner.push((new_range, ()));
 
-                scan_range.start.0 =
+                scan_range.start =
                     Ipv4Addr::from(u32::from(exclude_range.last) + 1);
-            } else if scan_range.start.0 < exclude_range.start {
+            } else if scan_range.start < exclude_range.start {
                 let new_range = RangeInclusive {
                     start: scan_range.start,
-                    last: (
-                        Ipv4Addr::from(exclude_range.start.to_bits() - 1),
-                        scan_range.last.1,
-                    ),
+                    last: Ipv4Addr::from(exclude_range.start.to_bits() - 1),
                 };
 
                 self.inner.push((new_range, ()));
@@ -114,9 +124,8 @@ impl AddressRanges {
                     Some((new_range, _)) => scan_range = new_range,
                     None => break,
                 };
-            } else if scan_range.last.0 > exclude_range.last {
-                scan_range.start.0 =
-                    Ipv4Addr::from(exclude_range.last.to_bits() + 1);
+            } else if scan_range.last > exclude_range.last {
+                scan_range.start = Ipv4Addr::from(exclude_range.last.to_bits() + 1);
             } else {
                 match scan_ranges.next() {
                     Some((new_range, _)) => scan_range = new_range,
@@ -133,16 +142,13 @@ impl AddressRanges {
         let mut ranges = Vec::with_capacity(self.inner.len());
         let mut index = 0;
         for (range, _) in self.inner {
-            let port_count = range.last.1 as usize - range.start.1 as usize + 1;
-            let count = (range.last.0.to_bits() as usize
-                - range.start.0.to_bits() as usize
-                + 1)
-                * port_count;
+            let count = range.last.to_bits() as usize
+                - range.start.to_bits() as usize
+                + 1;
 
             ranges.push((
                 range,
                 CompilationInfo {
-                    port_count: StrengthReducedUsize::new(port_count),
                     count,
                     index,
                 },
@@ -165,9 +171,10 @@ impl CompiledRanges {
     }
 
     #[inline]
-    pub fn index(&self, index: usize) -> Address {
+    pub fn index(&self, index: usize) -> Ipv4Addr {
         let mut start = 0;
         let mut end = self.inner.len();
+        
         while start < end {
             let mid = (start + end) / 2;
 
@@ -179,18 +186,9 @@ impl CompiledRanges {
             } else if range.1.index > index {
                 end = mid;
             } else {
-                // modulus & division at the same time + faster
-                let (addr, port) = StrengthReducedUsize::div_rem(
-                    index - range.1.index,
-                    range.1.port_count,
-                );
+                let addr = (index - range.1.index) as u32;
 
-                return (
-                    Ipv4Addr::from_bits(
-                        (range.0.start.0.to_bits() as usize + addr) as u32,
-                    ),
-                    range.0.start.1 + port as u16,
-                );
+                return Ipv4Addr::from_bits(range.0.start.to_bits() + addr);
             }
         }
 

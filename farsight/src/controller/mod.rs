@@ -1,14 +1,14 @@
 mod completer;
 mod printer;
-pub mod protocol;
 mod receiver;
 mod responder;
 mod scanner;
 mod sender;
-mod shared;
 
-pub mod session;
+pub mod shared;
 pub mod strategy;
+pub mod protocol;
+pub mod session;
 
 use crate::{
     config::{
@@ -29,20 +29,28 @@ use crate::{
     },
     xdp::umem::Umem,
 };
-use anyhow::Context;
+use anyhow::{anyhow, bail, Context};
 use aya::{maps::XskMap, programs::Xdp, Ebpf};
-use crossbeam_queue::SegQueue;
 use log::{debug, error, info, warn};
 use rand::random;
 use serde::Serialize;
-use std::{cell::RefCell, hint, marker::PhantomData, ops::{DerefMut, RangeInclusive}, ptr, sync::{
+use std::{cell::RefCell, hint, marker::PhantomData, mem, ops::{DerefMut, RangeInclusive}, ptr, sync::{
     atomic::{AtomicBool, Ordering}, mpsc,
     Arc,
     Mutex,
-}, thread::{Builder, JoinHandle, Scope}, time::{Duration, Instant}};
+}, thread, thread::{Builder, JoinHandle, Scope}, time::{Duration, Instant}};
+use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
+use std::rc::Rc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::RwLock;
+use crossbeam_queue::SegQueue;
+use crate::config::{Config, PingConfig, StrategyConfig};
 use crate::controller::printer::Printer;
+use crate::controller::strategy::adapter::{Adapter};
+use crate::controller::strategy::selector::Selector;
+use crate::net::range::Ipv4Ranges;
+use crate::xdp::ring::Consumer;
 use crate::xdp::socket::{BindFlags, Socket};
 
 /// the caller must make sure that `dst` is valid for writes of at least `src.len() * size_of::<T>()` bytes
@@ -61,29 +69,30 @@ pub const unsafe fn as_array_unchecked<T, const N: usize>(
     unsafe { &*(array.as_ptr() as *const [T; N]) }
 }
 
-pub struct Controller {
+pub(in crate::controller) type DestructedResponder<'umem> = (Receiver<'umem>, Sender<'umem>, Consumer<u64>);
+
+pub struct Controller<'umem> {
     // we have to own it because if we drop it the xdp program
     // gets unloaded
     _ebpf: Ebpf,
 
     pub(in crate::controller) shared: SharedData,
 
-    // todo: rethink this design here
-    pub(in crate::controller) senders: SegQueue<Sender>,
-    pub(in crate::controller) responders: SegQueue<(Receiver, Sender, Completer)>,
+    pub(in crate::controller) saturators: Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
+    pub database: Database,
 }
 
-impl Controller {
+impl<'umem> Controller<'umem> {
     #[inline]
     pub async fn new(
         mut ebpf: Ebpf,
-        controller_config: ControllerConfig,
-        xdp_config: XdpConfig,
+        umems: &'umem [Umem],
+        config: Config
     ) -> Result<Self, anyhow::Error> {
-        debug!("attaching to interface '{}'", controller_config.interface);
+        debug!("attaching to interface '{}'", config.controller.interface);
 
         let interface_index = interface::name_to_index(
-            &controller_config.interface,
+            &config.controller.interface,
         )
         .context("getting interface index from name - maybe it's wrong?")?;
 
@@ -95,71 +104,50 @@ impl Controller {
 
         debug!("gateway mac = {gateway_mac:02X?}");
 
-        let interface_mac = interface::get_mac(&controller_config.interface)
+        let interface_mac = interface::get_mac(&config.controller.interface)
             .context("getting interface mac")?;
 
         debug!("interface mac = {interface_mac:02X?}");
 
-        let source_ip = ip::get_local_ip(&controller_config.interface)
+        let source_ip = ip::get_local_ip(&config.controller.interface)
             .context("getting local ip")?;
 
         debug!("source ip = {source_ip:?}");
 
-        let queues = {
-            let mut guard =
-                InterfaceInfoGuard::new(&controller_config.interface)
-                    .context("initializing interface guard")?;
-
-            guard.queues().context("getting interface queues")?
-        };
-
-        debug!("queues = {queues:?}");
-
-        let queue_count = queues.current.combined;
-        if queues.max.combined > queue_count {
-            warn!(
-                "your current queue (channel) count on your nic is currently set to \
-                {} which is lower than its max value. set it to max using \
-                'ethtool -L {{interface}} combined {}' for better results",
-                queue_count, queues.max.combined
-            );
-        }
-
         let xdp_program: &mut Xdp =
             ebpf.program_mut("farsight_xdp").unwrap().try_into()?;
         xdp_program.load()?;
-        xdp_program.attach_to_if_index(interface_index, xdp_config.attach_mode.to_flags())
+        xdp_program.attach_to_if_index(interface_index, config.xdp.attach_mode.to_flags())
             .context("attaching the XDP program - XDP is unsupported for your network driver. try experimenting with the xdp.mode and xdp.attach_mode options.")?;
 
         let seed = random();
         debug!("seed = {seed}");
 
+        let flags = BindFlags::NeedWakeup | config.xdp.mode.to_flags();
+
+        let usable_queue_count = umems.len();
         let shared = SharedData::new(
             source_ip,
             gateway_mac,
             interface_mac,
-            controller_config.source_port_range[0],
-            controller_config.source_port_range[1],
-            controller_config.print_every,
+            config.controller.max_rate as f64 / usable_queue_count as f64,
+            config,
             seed,
-            xdp_config.checksum_offload,
-            xdp_config.ring_size,
-            controller_config.max_rate
         );
 
-        let senders = SegQueue::new();
-        let responders = SegQueue::new();
+        let database = Database::new(shared.clone())
+            .await
+            .context("creating database")?;
 
-        let flags = BindFlags::NeedWakeup | xdp_config.mode.to_flags();
+        // we give each socket its own umem to avoid collision errors,
+        // and it's overall better for concurrency
+        // wastes a bit of memory tho
+
+        let mut saturators = Vec::with_capacity(usable_queue_count);
 
         let mut socks = XskMap::try_from(ebpf.map_mut("SOCKS").unwrap())?;
-        for queue_id in 0..queue_count {
-            // we give each socket its own umem to avoid collision errors
-            // and it's overall better for concurrency
-            let umem = Arc::new(Umem::new(
-                2048,
-                3 * xdp_config.ring_size,
-            ).context("creating umem")?);
+        for queue_id in 0..usable_queue_count as u32 {
+            let umem = &umems[queue_id as usize];
 
             let socket = Socket::new().context("initializing socket")?;
             umem.bind(socket.clone())?;
@@ -169,10 +157,10 @@ impl Controller {
                     socket.rings().context("initializing ring allocator")?;
 
                 (
-                    allocator.tx(xdp_config.ring_size).context("initializing tx ring")?,
-                    allocator.fr(xdp_config.ring_size).context("initializing fr ring")?,
-                    allocator.rx(xdp_config.ring_size).context("initializing rx ring")?,
-                    allocator.cr(xdp_config.ring_size).context("initializing cr ring")?,
+                    allocator.tx(shared.config.xdp.ring_size).context("initializing tx ring")?,
+                    allocator.fr(shared.config.xdp.ring_size).context("initializing fr ring")?,
+                    allocator.rx(shared.config.xdp.ring_size).context("initializing rx ring")?,
+                    allocator.cr(shared.config.xdp.ring_size).context("initializing cr ring")?,
                 )
             };
 
@@ -184,13 +172,13 @@ impl Controller {
                 .set(queue_id, socket.clone(), 0)
                 .context("setting socket fd")?;
 
-            senders.push(Sender::new(
+            let sender = Sender::new(
                 shared.clone(),
-                umem.clone(),
+                umem,
                 socket.clone(),
                 tx,
                 0
-            ).context("initializing sender")?);
+            ).context("initializing sender")?;
 
             let socket_shared = Socket::new().context("initializing socket")?;
 
@@ -198,121 +186,65 @@ impl Controller {
                 let allocator =
                     socket_shared.rings().context("initializing ring allocator")?;
 
-                allocator.tx(xdp_config.ring_size).context("initializing tx ring")?
+                allocator.tx(shared.config.xdp.ring_size).context("initializing tx ring")?
             };
 
             socket_shared
                 .bind(BindFlags::SharedUmem, interface_index, queue_id, socket.as_raw_fd() as u32)
                 .context("binding socket")?;
 
-            responders.push((
-                Receiver::new(
-                    umem.clone(),
-                    socket.clone(),
-                    fr,
-                    rx,
-                    xdp_config.ring_size,
-                ).context("initializing receiver")?,
-                Sender::new(
-                    shared.clone(),
-                    umem,
-                    socket_shared.clone(),
-                    tx,
-                    2 * xdp_config.ring_size
-                ).context("initializing sender")?,
-                Completer::new(cr)
+            saturators.push((
+                sender,
+                (
+                    Receiver::new(
+                        umem,
+                        socket.clone(),
+                        fr,
+                        rx,
+                        shared.config.xdp.ring_size,
+                    ).context("initializing receiver")?,
+                    Sender::new(
+                        shared.clone(),
+                        umem,
+                        socket_shared.clone(),
+                        tx,
+                        2 * shared.config.xdp.ring_size
+                    ).context("initializing sender")?,
+                    cr
+                )
             ));
         }
 
         Ok(Self {
             _ebpf: ebpf,
 
+            database,
+
             shared,
 
-            responders,
-            senders,
+            saturators
         })
     }
 
     #[inline]
-    pub fn guard<'scope, 'env: 'scope, PA: Payload, P: Parser>(
-        &'env self,
-        scope: &'scope Scope<'scope, 'env>,
-        completed: &'env AtomicUsize,
-        queue: &'env SegQueue<Scanling<P>>,
-        database: &'env Database,
-        payload: &'env PA,
-        parser: &'env P,
-        ping_timeout: &'env Duration,
-    ) -> anyhow::Result<()> {
-        loop {
-            let Some((receiver, mut sender, mut completer)) = self.responders.pop() else {
-                break;
-            };
+    pub async fn session<A: Adapter>(
+        &'_ mut self,
+        seed_ports: &[u16],
+        excludes: &'_ Ipv4Ranges,
+        selector: impl Selector,
+    ) -> anyhow::Result<Session<'umem, '_, A>> {
+        let mut ranges = selector.select(
+            &mut self.database
+        ).await.context("selecting ranges")?;
 
-            let receiver = RefCell::new(receiver);
+        ranges.exclude(excludes);
 
-            scope.spawn(move || {
-                let mut responder = Responder::new(
-                    payload,
-                    parser,
-                    &mut sender,
-                    &receiver,
-                    *ping_timeout
-                );
-
-                loop {
-                    let result = responder.tick();
-                    if let Err(err) = result {
-                        error!("failed to tick receiver: {}", err);
-                    }
-
-                    if let Some(count) = completer.tick() {
-                        completed.fetch_add(
-                            count.get(),
-                            Ordering::Relaxed,
-                        );
-                    }
-
-                    for scanling in responder.scanlings.drain(..) {
-                        queue.push(scanling);
-                    }
-                }
-            });
-        }
-
-        scope.spawn(|| {
-            let mut printer = Printer::new(completed, self.shared.print_every);
-
-            loop {
-                printer.tick();
-
-                let Some(banner) = queue.pop() else {
-                    hint::spin_loop();
-
-                    continue;
-                };
-
-                if let Err(e) = database.write(&banner) {
-                    error!("failed to write to database: {e}");
-                } else {
-                    debug!("wrote 1 to database");
-                }
-            }
-        });
-
-        Ok(())
-    }
-
-    #[inline]
-    pub fn session(
-        &'_ self,
-        ranges: CompiledRanges,
-    ) -> Result<Session<'_>, anyhow::Error> {
         Session::new(
             self.shared.clone(),
-            &self.senders,
-            ranges,
-        )
+            &mut self.database,
+            &mut self.saturators,
+            ranges.compile(),
+            seed_ports
+        ).await
     }
 }

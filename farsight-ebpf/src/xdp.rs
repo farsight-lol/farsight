@@ -23,13 +23,12 @@ static SOURCE_PORT_START: u16 = 0;
 #[unsafe(no_mangle)]
 static SOURCE_PORT_END: u16 = 0;
 
+#[unsafe(no_mangle)]
+static USABLE_QUEUES: u32 = 0;
+
 #[xdp]
 pub fn farsight_xdp(ctx: XdpContext) -> u32 {
-    unsafe { try_farsight_xdp(&ctx) }.unwrap_or_else(|()| {
-        error!(&ctx, "aborting program...");
-
-        XDP_PASS
-    })
+    unsafe { try_farsight_xdp(&ctx) }.unwrap_or(XDP_PASS)
 }
 
 #[inline(always)]
@@ -67,15 +66,16 @@ unsafe fn try_farsight_xdp(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     let tcphdr = ptr_at::<TcpHdr>(ctx, EthHdr::LEN + 4 * ihl)?;
-    let dest = unsafe { (*tcphdr).dest };
+    let dest = u16::from_be(unsafe { (*tcphdr).dest });
 
     if dest < source_port_start || dest > source_port_end {
         // not sent by us
         return Ok(XDP_PASS);
     }
 
+    let usable_queues = unsafe { ptr::read_volatile(&USABLE_QUEUES) };
     SOCKS.redirect(
-        ctx.rx_queue_index(),
+        ctx.rx_queue_index() % usable_queues, // round-robin hell yeah
         0
     ).or(Ok(XDP_PASS))
 }

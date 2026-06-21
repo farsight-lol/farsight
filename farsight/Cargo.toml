@@ -23,15 +23,14 @@ rand_xorshift = "0.5"
 strength_reduce = "0.2"
 serde_with = "3"
 crossbeam-queue = "0.3"
-enum-map = "2"
-clickhouse = { version = "0.15", features = ["default", "chrono", "inserter", "uuid"] }
+dashmap = "6"
+clickhouse = { version = "0.15", features = ["default", "chrono"] }
 chrono = "0.4"
-enum_dispatch = "0.3"
 fxhash = "0.2.1"
 rtnetlink = "0.21"
 surge-ping = "0.8"
 futures = "0.3"
-core_affinity = "0.8.3"
+zerocopy = { version = "0.8", features = ["derive"] }
 
 [build-dependencies]
 aya-build = { git = "https://github.com/aya-rs/aya" }

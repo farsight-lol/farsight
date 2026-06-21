@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::Context;
 use bitflags::bitflags;
-use libc::{bind, getsockopt, recvfrom, sendto, setsockopt, sockaddr_xdp, socket, AF_XDP, MSG_DONTWAIT, PF_XDP, SOCK_CLOEXEC, SOCK_RAW, SOL_SOCKET, SOL_XDP, SO_BUSY_POLL, SO_BUSY_POLL_BUDGET, SO_PREFER_BUSY_POLL, XDP_COPY, XDP_SHARED_UMEM, XDP_STATISTICS, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP, XDP_USE_SG, XDP_ZEROCOPY};
+use libc::{bind, getsockopt, poll, pollfd, recvfrom, sendto, setsockopt, sockaddr_xdp, socket, AF_XDP, MSG_DONTWAIT, PF_XDP, SOCK_CLOEXEC, SOCK_RAW, SOL_SOCKET, SOL_XDP, SO_BUSY_POLL, SO_BUSY_POLL_BUDGET, SO_PREFER_BUSY_POLL, XDP_COPY, XDP_SHARED_UMEM, XDP_STATISTICS, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP, XDP_USE_SG, XDP_ZEROCOPY};
 use std::{
     io::Error,
     mem::MaybeUninit,
@@ -30,7 +30,7 @@ pub struct Statistics {
     pub rx_dropped: u64, // dropped for reasons other than invalid desc
     pub rx_invalid_descs: u64, // dropped due to invalid desc
     pub tx_invalid_descs: u64, // dropped due to invalid desc
-    pub rx_ring_full: u64,
+    pub rx_ring_full: u64, // idk what the rest means
     pub rx_fill_ring_empty_descs: u64,
     pub tx_ring_empty_descs: u64,
 }

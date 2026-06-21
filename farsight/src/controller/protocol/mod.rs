@@ -16,8 +16,6 @@ pub trait Parser: Send + Sync + Debug {
 
     fn parse(
         &'_ self,
-        ip: Ipv4Addr,
-        port: u16,
         data: &'_ [u8],
     ) -> Result<Self::Output, ParseError>;
 }

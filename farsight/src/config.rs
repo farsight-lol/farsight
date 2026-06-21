@@ -4,20 +4,23 @@ use aya::programs::XdpFlags;
 use serde::Deserialize;
 use serde_with::{serde_as, DurationSeconds};
 use std::{fs::read_to_string, time::Duration};
+use rand::RngExt;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub controller: ControllerConfig,
     pub database: DatabaseConfig,
+    pub strategy: StrategyConfig,
     pub session: SessionConfig,
     pub ping: PingConfig,
     pub xdp: XdpConfig,
+    pub tcp: TcpConfig,
 }
 
 #[serde_as]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ControllerConfig {
-    pub source_port_range: [u16; 2],
+    pub source_port: PortRange,
     pub interface: String,
 
     pub max_rate: u64,
@@ -26,35 +29,111 @@ pub struct ControllerConfig {
     pub print_every: Duration
 }
 
-#[derive(Deserialize)]
+#[serde_as]
+#[derive(Debug, Deserialize)]
 pub struct DatabaseConfig {
-    // todo
+    pub url: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub table: String,
+
+    #[serde_as(as = "DurationSeconds<u64>")]
+    pub flush_interval: Duration,
+    pub flush_capacity: usize
 }
 
 #[serde_as]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+pub struct StrategyConfig {
+    pub budget_per_address: u32,
+    pub epsilon: f64,
+
+    #[serde_as(as = "DurationSeconds<u64>")]
+    pub timeout: Duration,
+    pub seed_ports: Vec<PortRange>
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize)]
 pub struct SessionConfig {
     #[serde_as(as = "DurationSeconds<u64>")]
     pub duration: Duration,
+
+    pub rescan: RescanConfig
 }
 
 #[serde_as]
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+pub struct RescanConfig {
+    pub max_count: usize,
+    pub epsilon: f64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(untagged)]
+pub enum PortRange {
+    Range([u16; 2]),
+    Single(u16)
+}
+
+impl PortRange {
+    #[inline]
+    pub fn as_vec(&self) -> Vec<u16> {
+        match self {
+            PortRange::Range([start, end]) => (*start..=*end).into_iter().collect(),
+            PortRange::Single(port) => vec![*port]
+        }
+    }
+
+    #[inline]
+    pub fn sample(&self, rand: &mut impl rand::Rng) -> u16 {
+        match self {
+            PortRange::Range([start, end]) => rand.random_range(*start..=*end),
+            PortRange::Single(port) => *port
+        }
+    }
+
+    #[inline]
+    pub const fn start(&self) -> u16 {
+        match self {
+            PortRange::Range([start, _]) => *start,
+            PortRange::Single(port) => *port
+        }
+    }
+
+    #[inline]
+    pub const fn end(&self) -> u16 {
+        match self {
+            PortRange::Range([_, end]) => *end,
+            PortRange::Single(port) => *port
+        }
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize)]
 pub struct PingConfig {
     #[serde_as(as = "DurationSeconds<u64>")]
     pub timeout: Duration,
 
-    pub slp: SLPConfig,
+    pub slp: SlpConfig,
 }
 
-#[derive(Deserialize)]
-pub struct SLPConfig {
+#[derive(Debug, Deserialize)]
+pub struct SlpConfig {
     pub host: String,
     pub port: u16,
     pub protocol_version: i32,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+pub struct TcpConfig {
+    pub max_reorder_segments: usize,
+    pub max_reorder_bytes: usize,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[derive(PartialEq)]
 pub enum XdpMode {
@@ -74,9 +153,8 @@ impl XdpMode {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "kebab-case")]
-#[derive(PartialEq)]
 pub enum XdpAttachMode {
     Driver,
     Hardware,
@@ -94,7 +172,7 @@ impl XdpAttachMode {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct XdpConfig {
     pub mode: XdpMode,
     pub attach_mode: XdpAttachMode,

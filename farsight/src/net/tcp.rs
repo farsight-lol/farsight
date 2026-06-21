@@ -1,5 +1,7 @@
+use std::marker::ConstParamTy;
 use bitflags::bitflags;
 use std::net::Ipv4Addr;
+use zerocopy::{network_endian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 pub static TCP_PACKET: [u8; 62] = [
     // ETHER : [0..14]
@@ -70,30 +72,46 @@ pub static TCP_PACKET: [u8; 62] = [
     0x02, // sack-perm
 ];
 
-// minimal (with some fields hidden) struct for writing fields the packet above
+// minimal (with some fields hidden) struct for writing fields to the packet above
 // since apparently it's faster than direct byte writes
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C, packed)]
 pub struct EthTcpIpHdr {
     _padding_0: [u8; 16],
-    pub len: u16,
+    pub len: network_endian::U16,
     _padding_1: [u8; 6],
-    pub ip_checksum: u16,
+    pub ip_checksum: network_endian::U16,
     _padding_2: [u8; 4],
-    pub dest_addr: Ipv4Addr,
+    pub dest_addr: [u8; 4],
 
-    pub source_port: u16,
-    pub dest_port: u16,
-    pub seq: u32,
-    pub ack: u32,
+    pub source_port: network_endian::U16,
+    pub dest_port: network_endian::U16,
+    pub seq: network_endian::U32,
+    pub ack: network_endian::U32,
     _padding_3: u8,
-    pub flags: u8,
+    pub flags: TcpFlags,
     _padding_4: [u8; 2],
-    pub tcp_checksum: u16,
+    pub tcp_checksum: network_endian::U16,
 }
 
+// same thing here
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]
+#[repr(C, packed)]
+pub struct TcpHdr {
+    pub source_port: network_endian::U16,
+    pub dest_port: network_endian::U16,
+    pub seq: network_endian::U32,
+    pub ack: network_endian::U32,
+    _padding: u8,
+    pub flags: TcpFlags,
+}
+
+#[derive(IntoBytes, FromBytes, Immutable, KnownLayout, Unaligned, Eq, PartialEq, Debug, ConstParamTy)]
+#[repr(transparent)]
+pub struct TcpFlags(u8);
+
 bitflags! {
-    #[derive(PartialEq, Debug)]
-    pub struct TcpFlags: u8 {
+    impl TcpFlags: u8 {
         const Fin = 0b00000001;
         const Syn = 0b00000010;
         const Rst = 0b00000100;
@@ -105,11 +123,7 @@ bitflags! {
     }
 }
 
-#[cfg(target_pointer_width = "64")]
 const K: usize = 0xf1357aea2e62a9c5;
-
-#[cfg(target_pointer_width = "32")]
-const K: usize = 0x93d765dd;
 
 #[inline(always)]
 pub const fn cookie(ip: &Ipv4Addr, port: u16, seed: u64) -> u32 {

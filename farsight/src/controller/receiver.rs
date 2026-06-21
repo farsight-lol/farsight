@@ -7,23 +7,23 @@ use crate::{
 };
 use anyhow::Context;
 use libc::{XSK_UNALIGNED_BUF_ADDR_MASK, XSK_UNALIGNED_BUF_OFFSET_SHIFT};
-use std::slice::from_raw_parts;
+use std::slice::{from_raw_parts, from_raw_parts_mut};
 use std::sync::Arc;
 use log::error;
 use crate::xdp::umem::Umem;
 
-pub(super) struct Receiver {
-    umem: Arc<Umem>,
+pub(super) struct Receiver<'umem> {
+    umem: &'umem Umem,
     socket: Socket,
 
     fr: Producer<u64>,
     rx: Consumer<Descriptor>,
 }
 
-impl Receiver {
+impl<'umem> Receiver<'umem> {
     #[inline]
     pub(super) fn new(
-        umem: Arc<Umem>,
+        umem: &'umem Umem,
         socket: Socket,
         mut fr: Producer<u64>,
         rx: Consumer<Descriptor>,
@@ -52,23 +52,20 @@ impl Receiver {
     }
 
     #[inline]
-    pub(super) fn receive(&mut self) -> Result<Option<BatchGuard<'_>>, anyhow::Error> {
+    pub(super) fn receive(&mut self) -> Result<Option<BatchGuard<'umem, '_>>, anyhow::Error> {
         let Some((rx_start, count)) = self.rx.peek(self.rx.size()) else {
             return Ok(None);
         };
 
-        let fill_start = loop {
-            if self.fr.flags().needs_wakeup() {
-                self.socket.recvfrom().context("kicking fill ring")?;
-            }
+        if self.fr.flags().needs_wakeup() {
+            self.socket.recvfrom().context("kicking fill ring")?;
+        }
 
-            if let Some(index) = self.fr.reserve(count) {
-                break index;
-            }
-        };
+        let fill_start = self.fr.reserve(count)
+            .context("reserving fill ring, leak somewhere?")?;
 
         Ok(Some(BatchGuard {
-            umem: self.umem.clone(),
+            umem: self.umem,
             fr: &mut self.fr,
             rx: &self.rx,
             socket: self.socket.clone(),
@@ -81,8 +78,8 @@ impl Receiver {
     }
 }
 
-pub(super) struct BatchGuard<'c> {
-    umem: Arc<Umem>,
+pub(super) struct BatchGuard<'umem: 'c, 'c> {
+    umem: &'umem Umem,
     fr: &'c mut Producer<u64>,
     rx: &'c Consumer<Descriptor>,
     socket: Socket,
@@ -93,8 +90,8 @@ pub(super) struct BatchGuard<'c> {
     cursor: u32,
 }
 
-impl<'c> Iterator for BatchGuard<'c> {
-    type Item = &'c [u8];
+impl<'umem: 'c, 'c> Iterator for BatchGuard<'umem, 'c> {
+    type Item = &'c mut [u8];
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -112,7 +109,7 @@ impl<'c> Iterator for BatchGuard<'c> {
         self.cursor += 1;
 
         Some(unsafe {
-            from_raw_parts(
+            from_raw_parts_mut(
                 self.umem.as_ptr().add(addr),
                 desc.len as usize,
             )
@@ -120,7 +117,7 @@ impl<'c> Iterator for BatchGuard<'c> {
     }
 }
 
-impl<'c> Drop for BatchGuard<'c> {
+impl<'umem: 'c, 'c> Drop for BatchGuard<'umem, 'c> {
     #[inline]
     fn drop(&mut self) {
         for i in self.cursor..self.count {

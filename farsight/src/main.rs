@@ -1,48 +1,35 @@
-#![feature(ip_as_octets)]
+#![feature(ip_as_octets, adt_const_params, const_param_ty_trait, min_adt_const_params)]
 
 extern crate core;
 
-mod config;
 mod controller;
+mod config;
 mod database;
 mod exclude;
 mod net;
 mod xdp;
 
-use crate::{
-    config::{XdpAttachMode, XdpMode},
-    controller::{
-        session::Session,
-        strategy::{ip::range::RangedIps, selector::StrategySelector, Strategy},
-        Controller,
-    },
-    database::Database,
-    net::{
-        interface, interface::IfAddrs, ip, nic::InterfaceInfoGuard,
-        range::Ipv4Ranges,
-    },
+use std::collections::HashSet;
+use crate::controller::{
+    Controller,
 };
-use anyhow::{bail, Context};
+use anyhow::Context;
 use aya::{
-    maps::XskMap, programs::{SkMsg, Xdp, XdpFlags},
     Btf,
     EbpfLoader,
 };
 use aya_log::EbpfLogger;
 use controller::protocol::minecraft::{build_latest_request, SLPParser};
-use crossbeam_queue::SegQueue;
-use log::{debug, error, info, warn};
-use net::gateway;
-use std::{cell::{Cell, RefCell}, fs::File, hint, io::Error, net::Ipv4Addr, sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-}, thread::Builder, time::{Duration, Instant}};
-use std::sync::atomic::AtomicUsize;
-use tokio::runtime::Runtime;
-use crate::net::tcp::{TCP_PACKET};
+use std::io::Error;
+use std::thread;
+use log::{debug, info, trace, warn};
+use rand::{random, RngExt, SeedableRng};
+use rand_xorshift::XorShiftRng;
+use crate::controller::strategy::adapter::session::SessionAdapter;
+use crate::controller::strategy::selector::{AllSelector, RescanSelector};
+use crate::net::nic::InterfaceInfoGuard;
+use crate::xdp::umem::Umem;
 
-// stupid aya-rs requires tokio
-// fuck you
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     env_logger::init();
@@ -54,16 +41,49 @@ async fn main() -> Result<(), anyhow::Error> {
     let excludes =
         exclude::load("exclude.conf").context("loading exclude file")?;
 
+    let queues = {
+        let mut guard =
+            InterfaceInfoGuard::new(&config.controller.interface)
+                .context("initializing interface guard")?;
+
+        guard.queues().context("getting interface queues")?
+    };
+
+    debug!("queues = {queues:?}");
+
+    let queue_count = queues.current.combined;
+    let core_count = thread::available_parallelism()
+        .context("error getting core count")?
+        .get();
+
+    let usable_queue_count = ((core_count.saturating_sub(1)) / 2)
+        .max(1)
+        .min(queue_count as usize) as u32;
+
+    debug!("usable queue count = {}", usable_queue_count);
+    if usable_queue_count < queue_count {
+        warn!(
+              "NIC reports {} queues but only using {} to leave cores free for management/db; \
+              consider 'ethtool -L {} combined {}' to match",
+              queue_count, usable_queue_count, config.controller.interface, usable_queue_count
+            );
+    }
+
     let mut bpf = EbpfLoader::new()
         .btf(Btf::from_sys_fs().ok().as_ref())
         .set_global(
             "SOURCE_PORT_START",
-            &config.controller.source_port_range[0].to_be(),
+            &config.controller.source_port.start(),
             true,
         )
         .set_global(
             "SOURCE_PORT_END",
-            &config.controller.source_port_range[1].to_be(),
+            &config.controller.source_port.end(),
+            true,
+        )
+        .set_global(
+            "USABLE_QUEUES",
+            &usable_queue_count,
             true,
         )
         .load(aya::include_bytes_aligned!(concat!(
@@ -73,10 +93,6 @@ async fn main() -> Result<(), anyhow::Error> {
 
     EbpfLogger::init(&mut bpf)?;
 
-    let controller = Controller::new(bpf, config.controller, config.xdp)
-        .await
-        .context("creating controller")?;
-
     let parser = SLPParser;
     let payload = build_latest_request(
         &config.ping.slp.host,
@@ -84,70 +100,50 @@ async fn main() -> Result<(), anyhow::Error> {
         config.ping.slp.protocol_version,
     );
 
-    let scanling_queue = SegQueue::new();
-    let completed = AtomicUsize::new(0);
-    let database = Database::new(config.database)
+    let seed_ports = config.strategy.seed_ports.iter()
+        .flat_map(|range| range.as_vec())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let umems = (0..usable_queue_count)
+        .map(|_| Umem::new(
+            2048,
+            3 * config.xdp.ring_size,
+        ).context("creating umem"))
+        .collect::<Result<Box<[_]>, _>>()?;
+
+    let rescan_selector = RescanSelector::new(config.session.rescan.max_count);
+    let epsilon = config.session.rescan.epsilon;
+    let duration = config.session.duration;
+
+    let mut controller = Controller::new(bpf, &umems, config)
         .await
-        .context("creating database")?;
+        .context("creating controller")?;
 
-    let strategy_selector = StrategySelector::new(&database)
-        .context("creating strategy selector")?;
+    let mut rng = XorShiftRng::from_seed(random());
+    loop {
+        if rng.random_range(0f64..=1f64) >= epsilon {
+            info!("scanning");
 
-    std::thread::scope(|scope| {
-        controller
-            .guard(
-                scope,
-                &completed,
-                &scanling_queue,
-                &database,
-                &payload,
-                &parser,
-                &config.ping.timeout,
-            )
-            .expect("guarding controller");
+            controller.session::<SessionAdapter>(
+                &seed_ports,
+                &excludes,
+                AllSelector
+            ).await
+        } else {
+            info!("rescanning");
 
-        // we gotta move it off-thread since we don't wanna interfere
-        // with tokio
-        // again, fuck you aya-rs
-        scope.spawn(|| {
-            loop {
-                let mut ranges = {
-                    let strategy = strategy_selector.select();
+            controller.session::<SessionAdapter>(
+                &seed_ports,
+                &excludes,
+                rescan_selector.clone()
+            ).await
+        }.expect("creating session")
+            .start(duration, &payload, &parser);
+    }
 
-                    debug!("chosen strategy: {strategy:?}");
-
-                    match strategy.generate_ranges() {
-                        Ok(ranges) => ranges,
-
-                        Err(err) => {
-                            error!(
-                                "error generating ranges, skipping: {err:?}"
-                            );
-
-                            continue;
-                        }
-                    }
-                };
-
-                ranges.exclude(&excludes);
-
-                let ranges = ranges.compile();
-
-                debug!("scanning {} targets", ranges.count());
-
-                let sesh =
-                    controller.session(ranges).expect("creating session");
-
-                info!("starting session");
-
-                sesh.start(config.session.duration);
-
-                info!("exiting session");
-            }
-        });
-
-        Ok(())
-    })
+    Ok(())
 }
 
 fn set_resource_limit() -> Result<(), Error> {

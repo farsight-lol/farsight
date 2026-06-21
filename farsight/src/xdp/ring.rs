@@ -35,16 +35,6 @@ pub struct Descriptor {
     pub options: u32,
 }
 
-bitflags! {
-    pub struct MmapFlags: i32 {
-        const Private = MAP_PRIVATE;
-        const Anonymous = MAP_ANONYMOUS;
-        const NoReserve = MAP_NORESERVE;
-        const Shared = MAP_SHARED;
-        const Populate = MAP_POPULATE;
-    }
-}
-
 #[repr(C)]
 pub struct RingOffset {
     pub producer: u64,
@@ -176,6 +166,7 @@ pub struct Ring<T> {
     area: NonNull<[u8]>,
 }
 
+// trust me bro
 unsafe impl<T> Send for Ring<T> {}
 
 impl<T> Ring<T> {
@@ -193,7 +184,7 @@ impl<T> Ring<T> {
                 null_mut(),
                 len,
                 PROT_READ | PROT_WRITE,
-                (MmapFlags::Populate | MmapFlags::Shared).bits(),
+                MAP_POPULATE | MAP_SHARED,
                 allocator.socket.as_raw_fd(),
                 kind.get_page_offset(),
             )

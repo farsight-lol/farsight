@@ -11,13 +11,11 @@ use std::{
 pub struct SLPParser;
 
 impl Parser for SLPParser {
-    type Output = SLPResponse;
+    type Output = String;
 
     #[inline]
     fn parse(
         &'_ self,
-        _ip: Ipv4Addr,
-        _port: u16,
         data: &'_ [u8],
     ) -> Result<Self::Output, ParseError> {
         let mut stream = Cursor::new(data);
@@ -38,9 +36,8 @@ impl Parser for SLPParser {
             return Err(ParseError::Incomplete);
         }
 
-        match serde_json::from_slice(status_buffer) {
-            Ok(value) => Ok(value),
-
+        match serde_json::from_slice::<serde_json::Value>(status_buffer) {
+            Ok(_) => Ok(String::from_utf8_lossy(status_buffer).to_string()),
             Err(_) => Err(ParseError::Invalid),
         }
     }
@@ -113,6 +110,7 @@ fn read_varint(
         reader
             .read_exact(&mut buffer)
             .or(Err(ParseError::Incomplete))?;
+
         ans |= ((buffer[0] & 0b0111_1111) as i32) << (7 * i);
 
         if buffer[0] & 0b1000_0000 == 0 {
@@ -123,102 +121,4 @@ fn read_varint(
     Ok(ans)
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SLPResponse {
-    pub version: Version,
-    pub players: Players,
-    pub description: Option<serde_json::Value>,
-    pub favicon: Option<String>,
-    #[serde(rename = "enforcesSecureChat")]
-    pub enforces_secure_chat: Option<bool>,
-    #[serde(rename = "previewsChat")]
-    pub previews_chat: Option<bool>,
-    #[serde(rename = "modinfo")]
-    pub mod_info: Option<ModInfo>,
-    #[serde(rename = "forgeData")]
-    pub forge_data: Option<ForgeData>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Version {
-    pub name: String,
-    pub protocol: i32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Players {
-    pub max: usize,
-    pub online: usize,
-    pub sample: Option<Vec<Player>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-/// The sample players' information.
-pub struct Player {
-    /// The name of the player.
-    pub name: String,
-    /// The uuid of the player.
-    /// Normally used to identify a player.
-    pub id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-/// The mod information object used in FML protocol (version 1.7 - 1.12).
-pub struct ModInfo {
-    #[serde(rename = "type")]
-    /// The field `type` of `modinfo`. It should be FML if forge is installed.
-    pub mod_type: String,
-    #[serde(rename = "modList")]
-    /// The list of the mod installed on the server.
-    /// See also [`ModInfoItem`](ModInfoItem)
-    pub mod_list: Vec<ModInfoItem>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-/// The information of an installed mod.
-pub struct ModInfoItem {
-    #[serde(rename = "modid")]
-    /// The id of the mod.
-    pub mod_id: String,
-    /// The version of the mod.
-    pub version: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-/// The forge information object used in FML2 protocol (version 1.13 - current).
-pub struct ForgeData {
-    /// The list of the channels used by the mods.
-    /// See [the minecraft protocol wiki](https://wiki.vg/Plugin_channels) for more information.
-    pub channels: Vec<ForgeChannel>,
-    /// The list of the mods installed on the server.
-    pub mods: Vec<ForgeMod>,
-    #[serde(rename = "fmlNetworkVersion")]
-    pub fml_network_version: i32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-/// The information of the channels used by the mods.
-///
-/// See [the minecraft protocol wiki](https://wiki.vg/Plugin_channels) for more information.
-/// Unfortunately, the exact semantics of its field is currently not found.
-/// We do not guarantee the document is right, and you should re-check the values you've received.
-pub struct ForgeChannel {
-    /// The namespaced key of the channel
-    pub res: String,
-    /// The version of the channel
-    pub version: String,
-    /// `true` if it is required
-    pub required: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-/// The information of an installed mod.
-pub struct ForgeMod {
-    #[serde(rename = "modId")]
-    /// The id of the mod.
-    pub mod_id: String,
-    #[serde(rename = "modmarker")]
-    /// The version of the mod.
-    pub mod_marker: String,
-}
 // copied from craftping (https://github.com/kiwiyou/craftping) - END

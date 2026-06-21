@@ -2,105 +2,89 @@ use crate::{
     controller::sender::Sender,
     net::range::CompiledRanges,
 };
-use perfect_rand::PerfectRng;
-use rand::{random, RngExt, SeedableRng};
+use rand::{random, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use std::{net::Ipv4Addr, sync::atomic::{AtomicU64, Ordering}, thread};
+use std::{net::Ipv4Addr, sync::atomic::{AtomicU64}, thread};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use crate::controller::completer::Completer;
+use crate::controller::strategy::adapter::Adapter;
 
-pub(super) struct Scanner<'b> {
-    sender: &'b mut Sender,
-
-    xor_shift_rng: XorShiftRng,
-
-    rng: &'b PerfectRng,
-    ranges: &'b CompiledRanges,
-    index: &'b AtomicU64,
-
+pub(super) struct Scanner<'umem: 'b, 'b, A: Adapter> {
+    adapter: &'b A,
+    
     targets: Vec<(u16, Ipv4Addr, u16)>,
 
     tokens: f64,
     last_refill: Instant,
+
+    sender: Sender<'umem>,
     rate: f64
 }
 
-impl<'b> Scanner<'b> {
+impl<'umem: 'b, 'b, A: Adapter> Scanner<'umem, 'b, A> {
     #[inline]
     pub(super) fn new(
-        sender: &'b mut Sender,
-        ranges: &'b CompiledRanges,
-        rng: &'b PerfectRng,
-        index: &'b AtomicU64,
-        rate: f64
+        sender: Sender<'umem>,
+        adapter: &'b A,
     ) -> Self {
         Self {
-            xor_shift_rng: XorShiftRng::from_seed(random()),
+            adapter,
 
-            rng,
-            ranges,
-            index,
-
-            targets: Vec::with_capacity(sender.shared.ring_size as usize),
+            targets: Vec::with_capacity(sender.shared.config.xdp.ring_size as usize),
 
             tokens: 0f64,
             last_refill: Instant::now(),
 
-            rate,
-
+            rate: sender.shared.per_scanner_rate,
             sender,
         }
     }
 
     #[inline]
-    pub(super) fn tick(&mut self) -> (bool, Option<anyhow::Error>) {
+    pub(super) fn tick(&mut self, completer: &mut Completer) -> Option<anyhow::Error> {
         self.targets.clear();
 
-        let mut finished = false;
+        let mut taken = 0;
 
         let batch = self.next_batch();
-        let index = self.index.fetch_add(batch, Ordering::Relaxed);
-
-        for index in index..index + batch {
-            if index >= self.ranges.count() as u64 {
-                finished = true;
-
-                break;
+        for _ in 0..batch {
+            match self.adapter.pop() {
+                Some(target) => {
+                    taken += 1;
+                    self.targets.push(target)
+                },
+                None => break,
             }
-
-            let index =
-                self.rng.shuffle(index)
-                    as usize;
-
-            let (ip, port) = self.ranges.index(index);
-            let src_port = self.xor_shift_rng.random_range(
-                self.sender.shared.source_port_start
-                    ..=self.sender.shared.source_port_end,
-            );
-
-            // essentially free since pre-allocated
-            self.targets.push((src_port, ip, port));
         }
 
-        let error = self.sender.send_syn_batch(&self.targets).err();
+        if taken < batch {
+            self.tokens += (batch - taken) as f64;
 
-        (finished, error)
+            if taken == 0 {
+                thread::sleep(Duration::from_micros(100));
+            }
+        }
+
+        self.sender.send_syn_batch(&self.targets, completer).err()
     }
 
     #[inline]
     fn next_batch(&mut self) -> u64 {
+        let rate = self.rate;
         loop {
             let now = Instant::now();
             let elapsed = now.duration_since(self.last_refill).as_secs_f64();
             self.last_refill = now;
 
-            self.tokens = (self.tokens + elapsed * self.rate).min(self.targets.capacity() as f64);
+            self.tokens = (self.tokens + elapsed * rate).min(self.targets.capacity() as f64);
 
             if self.tokens < 1.0 {
                 let need = 1.0 - self.tokens;
-                let wait = (need / self.rate).min(0.1);
-                
+                let wait = (need / rate).min(0.1);
+
                 thread::sleep(Duration::from_secs_f64(wait));
-                
+
                 continue;
             }
 
@@ -109,5 +93,10 @@ impl<'b> Scanner<'b> {
 
             return take as u64;
         }
+    }
+
+    #[inline]
+    pub(super) fn into_inner(self) -> Sender<'umem> {
+        self.sender
     }
 }

@@ -1,9 +1,11 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::{
     controller::{
         as_array_unchecked,
         protocol::{ParseError, Parser, Payload},
         receiver::Receiver,
-        sender::{PacketTemplate, Sender},
+        sender::{Sender},
     },
     database::Scanling,
     net::{
@@ -11,110 +13,147 @@ use crate::{
     },
 };
 use fxhash::FxHashMap;
-use log::{debug, error, info, trace};
-use std::{
-    cell::{RefCell, UnsafeCell},
-    collections::HashMap,
-    fmt::Debug,
-    marker::PhantomData,
-    net::Ipv4Addr,
-    slice::IterMut,
-    sync::{
-        atomic::{AtomicBool, Ordering}, Arc,
-        MutexGuard,
-    },
-    thread,
-    time::{Duration, Instant},
-};
-use anyhow::Error;
-use crate::controller::receiver::BatchGuard;
+use log::{debug, error, trace};
+use std::{net::Ipv4Addr, time::{Duration, Instant}};
+use std::collections::BTreeMap;
+use anyhow::{bail};
+use rand::{random, SeedableRng};
+use rand_xorshift::XorShiftRng;
+use zerocopy::{FromBytes};
+use crate::controller::completer::Completer;
+use crate::controller::strategy::adapter::Adapter;
+use crate::net::tcp::TcpHdr;
 
 struct State {
     data: Vec<u8>,
 
-    next_seq: Option<u32>,
-
     next_expected_seq: u32,
-    next_expected_ack: Option<u32>,
+    next_expected_ack: u32,
 
-    fin_sent: bool,
+    reorder_buffer: BTreeMap<u32, Vec<u8>>,
 
     timestamp: Instant,
 }
 
-pub(super) struct Responder<'b, PA: Payload, P: Parser> {
+type Connections = FxHashMap<(Ipv4Addr, u16), State>;
+type Scanlings<P> = Vec<Scanling<P>>;
+
+pub(super) struct Responder<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> {
+    adapter: &'b A,
+
     payload: &'b PA,
     parser: &'b P,
 
-    receiver: &'b RefCell<Receiver>,
-    pub(super) sender: &'b mut Sender,
+    receiver: Receiver<'umem>,
+    sender: Sender<'umem>,
 
-    ping_timeout: Duration,
-    connections: FxHashMap<(Ipv4Addr, u16), State>,
+    connections: Connections,
+    pub(super) scanlings: Scanlings<P>,
 
-    pub(super) scanlings: Vec<Scanling<P>>,
+    rng: XorShiftRng,
+
+    // just a tad bit more cache friendly
+    seed: u64,
+    max_reorder_segments: usize,
+    max_reorder_bytes: usize,
+    timeout: Duration,
 }
 
-impl<'b, PA: Payload, P: Parser> Responder<'b, PA, P> {
+impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, PA, P> {
     #[inline]
     pub(super) fn new(
+        receiver: Receiver<'umem>,
+        sender: Sender<'umem>,
+        adapter: &'b A,
         payload: &'b PA,
         parser: &'b P,
-        sender: &'b mut Sender,
-        receiver: &'b RefCell<Receiver>,
-        ping_timeout: Duration
     ) -> Self {
         Self {
-            scanlings: Vec::with_capacity(sender.shared.ring_size as usize),
+            seed: sender.shared.seed,
+            max_reorder_segments: sender.shared.config.tcp.max_reorder_segments,
+            max_reorder_bytes: sender.shared.config.tcp.max_reorder_bytes,
+            timeout: sender.shared.config.ping.timeout,
 
+            scanlings: Vec::with_capacity(sender.shared.config.xdp.ring_size as usize),
+            rng: XorShiftRng::from_seed(random()),
+
+            adapter,
             payload,
-            parser,
 
+            parser,
             receiver,
+
             sender,
 
-            ping_timeout,
             connections: FxHashMap::default(),
         }
     }
 
     #[inline]
-    pub(super) fn tick(&'_ mut self) -> anyhow::Result<()> {
-        let mut receiver = self.receiver.borrow_mut();
+    pub(super) fn tick(&'_ mut self, completer: &mut Completer) -> anyhow::Result<()> {
+        let Responder {
+            adapter,
+            receiver,
+            payload,
+            parser,
+            sender,
+            connections,
+            scanlings,
+            rng,
+            max_reorder_bytes,
+            max_reorder_segments,
+            seed,
+            timeout: _
+        } = self;
+
         let Some(data_batch) = receiver.receive()? else {
             return Ok(());
         };
 
         for data in data_batch {
-            self.process_packet(data);
+            if let Err(err) = Self::process_packet(
+                adapter,
+                payload,
+                parser,
+                sender,
+                connections,
+                scanlings,
+                data,
+                rng,
+                *seed,
+                *max_reorder_bytes,
+                *max_reorder_segments,
+                completer
+            ) {
+                error!("error ticking controller: {:?}", err);
+            }
         }
+
+        connections.retain(|_, state| state.timestamp.elapsed() < self.timeout);
 
         Ok(())
     }
 
     #[inline]
-    fn process_packet<'a, 'c: 'a>(&'a mut self, data: &'c [u8]) {
+    fn process_packet(
+        adapter: &A,
+        payload: &PA,
+        parser: &P,
+        sender: &mut Sender,
+        connections: &mut FxHashMap<(Ipv4Addr, u16), State>,
+        scanlings: &mut Vec<Scanling<P>>,
+        data: &mut [u8],
+        rng: &mut XorShiftRng,
+        seed: u64,
+        max_reorder_bytes: usize,
+        max_reorder_segments: usize,
+        completer: &mut Completer
+    ) -> anyhow::Result<()> {
         let ip = Ipv4Addr::from_octets(*unsafe {
             as_array_unchecked(&data[26..30])
         });
 
         let tcp_start = 14 + ((data[14] & 0x0F) << 2) as usize;
-        let port = u16::from_be_bytes(*unsafe {
-            as_array_unchecked(&data[tcp_start..tcp_start + 2])
-        });
-
-        let dest_port = u16::from_be_bytes(*unsafe {
-            as_array_unchecked(&data[tcp_start + 2..tcp_start + 4])
-        });
-
-        let seq = u32::from_be_bytes(*unsafe {
-            as_array_unchecked(&data[tcp_start + 4..tcp_start + 8])
-        });
-
-        let ack = u32::from_be_bytes(*unsafe {
-            as_array_unchecked(&data[tcp_start + 8..tcp_start + 12])
-        });
-
         let ip_total_len = u16::from_be_bytes(*unsafe {
             as_array_unchecked(&data[16..18])
         }) as usize;
@@ -122,230 +161,372 @@ impl<'b, PA: Payload, P: Parser> Responder<'b, PA, P> {
         let packet_end = usize::min(
             14 + ip_total_len,
             data.len()
-        );
+        ); // to get rid of ethernet frame padding
 
         let tcp_header_len = ((data[tcp_start + 12] & 0xF0) >> 2) as usize;
-        let payload_start = tcp_start + tcp_header_len;
 
-        let payload = &data[payload_start..packet_end];
+        let tcp_payload = &data[tcp_start + tcp_header_len..packet_end];
+        let hdr = match TcpHdr::ref_from_bytes(&data[tcp_start..tcp_start + size_of::<TcpHdr>()]) {
+            Ok(hdr) => hdr,
+            Err(err) => {
+                debug!("error casting header: {:?}", err);
+                return Ok(())
+            }
+        };
 
-        let flags = TcpFlags::from_bits_retain(data[tcp_start + 13]);
-        if flags.contains(TcpFlags::Fin) {
-            self.process_fin(ip, port, dest_port, seq, ack, payload);
-        } else if flags.contains(TcpFlags::Syn | TcpFlags::Ack) {
-            self.process_syn_ack(ip, port, dest_port, seq, ack);
-        } else if flags.contains(TcpFlags::Ack) {
-            self.process_ack(ip, port, dest_port, seq, ack, payload);
+        if hdr.flags.contains(TcpFlags::Rst) {
+            let port = hdr.source_port.get();
+
+            adapter.on_empty(ip, port, rng);
+            connections.remove(&(ip, port));
+        } else if hdr.flags.contains(TcpFlags::Fin) {
+            Self::process_fin(
+                ip,
+                hdr,
+                tcp_payload,
+
+                adapter,
+                sender,
+                connections,
+                scanlings,
+                parser,
+                rng,
+
+                completer
+            )?;
+        } else if hdr.flags.contains(TcpFlags::Syn | TcpFlags::Ack) {
+            Self::process_syn_ack(
+                ip,
+                hdr,
+
+                adapter,
+                sender,
+                connections,
+                payload,
+                rng,
+                seed,
+
+                completer
+            )?;
+        } else if hdr.flags.contains(TcpFlags::Ack) {
+            Self::process_ack(
+                ip,
+                hdr,
+                tcp_payload,
+
+                adapter,
+                sender,
+                connections,
+                scanlings,
+                parser,
+                rng,
+
+                max_reorder_bytes,
+                max_reorder_segments,
+
+                completer
+            )?;
         }
 
-        self.connections
-            .retain(|_, state| state.timestamp.elapsed() < self.ping_timeout);
+        Ok(())
     }
 
-    fn process_fin(&mut self, ip: Ipv4Addr, port: u16, dest_port: u16, seq: u32, ack: u32, payload: &[u8]) {
-        trace!("fin from {ip}:{port}");
+    fn process_syn_ack(
+        ip: Ipv4Addr,
+        hdr: &TcpHdr,
 
-        let state = match self.connections.get_mut(&(ip, port)) {
-            Some(state) => state,
-            None => {
-                trace!("fin from unknown or forgotten {ip}:{port}");
+        adapter: &A,
+        sender: &mut Sender,
+        connections: &mut Connections,
+        payload: &PA,
+        rng: &mut XorShiftRng,
+        seed: u64,
 
-                self.sender.send(PacketTemplate::new(
-                    TcpFlags::Rst,
-                    ip,
-                    dest_port,
-                    port,
-                    ack,
-                    seq.wrapping_add(1)
-                ));
+        completer: &mut Completer
+    ) -> anyhow::Result<()> {
+        let source_port = hdr.dest_port.get();
+        let port = hdr.source_port.get();
+        let ack = hdr.ack.get();
+        let seq = hdr.seq.get();
 
-                return
-            }
-        };
+        let expected_ack = cookie(&ip, port, seed).wrapping_add(1);
+        if ack != expected_ack {
+            trace!("syn+ack with cookie mismatch from {ip}:{port}; expected {expected_ack} got {ack}");
 
-        let next_seq = match state.next_seq {
-            Some(next_seq) => next_seq,
-            None => return
-        };
+            adapter.on_empty(ip, port, rng);
 
-        self.sender.send(PacketTemplate::new(
-            if state.fin_sent {
-                TcpFlags::Ack
-            } else {
-                state.fin_sent = true;
-
-                TcpFlags::Fin | TcpFlags::Ack
-            },
-            ip,
-            dest_port,
-            port,
-            next_seq.wrapping_add(1),
-            seq.wrapping_add(1)
-        ));
-
-        if payload.is_empty() {
-            return
-        }
-
-        state.data.extend_from_slice(payload);
-
-        let state =  self.connections.remove(&(ip, port)).unwrap();
-        match self.parser.parse(ip, port, &state.data) {
-            Ok(banner) => {
-                self.sender.shared.reward.fetch_add(10, Ordering::AcqRel);
-
-                self.scanlings.push(Scanling::new(ip, port, banner));
-            }
-
-            Err(ParseError::Invalid) => {
-                self.sender.shared.reward.fetch_sub(1, Ordering::AcqRel);
-
-                trace!("invalid data from FIN from {ip}:{port}, ignoring")
-            }
-
-            Err(ParseError::Incomplete) => {
-                trace!("incomplete data from FIN from {ip}:{port}, ignoring")
-            }
-        };
-    }
-
-    fn process_syn_ack(&mut self, ip: Ipv4Addr, port: u16, dest_port: u16, seq: u32, ack: u32) {
-        if ack != cookie(&ip, port, self.sender.shared.seed).wrapping_add(1)
-        {
-            debug!("syn+ack cookie mismatch from {ip}:{port}");
-
-            return;
+            return Ok(());
         }
 
         trace!("syn+ack from {ip}:{port}");
 
-        self.sender.shared.reward.fetch_add(3, Ordering::AcqRel);
-
-        let payload = match self.payload.build(ip, port) {
+        let payload = match payload.build(ip, port) {
             Ok(payload) => payload,
             Err(err) => {
-                error!(
-                        "error building payload for {ip}:{port}, skipping: {err}"
-                    );
-
                 // skip this server
-                self.sender.send(PacketTemplate::new(
-                    TcpFlags::Rst,
+                sender.send::<{ TcpFlags::Rst }>(
                     ip,
-                    dest_port,
+                    source_port,
                     port,
                     ack,
-                    seq.wrapping_add(1)
-                ));
+                    seq,
+                    completer
+                )?;
 
-                return;
+                adapter.on_empty(ip, port, rng);
+
+                bail!("error building payload for {ip}:{port}, skipping: {err}")
             }
         };
 
-        // send our payload
-        self.sender.send_with_data(PacketTemplate::new(
-            TcpFlags::Psh | TcpFlags::Ack,
+        let seq = seq.wrapping_add(1);
+        sender.send_with_data(
             ip,
-            dest_port,
+            source_port,
             port,
             ack,
-            seq.wrapping_add(1)
-        ), payload);
+            seq,
+            payload,
+            completer
+        )?;
 
-        self.connections.insert(
+        connections.insert(
             (ip, port),
             State {
                 data: Vec::new(),
 
-                next_seq: None,
+                next_expected_seq: seq,
+                next_expected_ack: ack.wrapping_add(payload.len() as u32),
 
-                next_expected_seq: 0,
-                next_expected_ack: Some(
-                    ack.wrapping_add(payload.len() as u32),
-                ),
-
-                fin_sent: false,
+                reorder_buffer: BTreeMap::new(),
 
                 timestamp: Instant::now(),
             },
         );
+
+        Ok(())
     }
 
-    fn process_ack(&mut self, ip: Ipv4Addr, port: u16, dest_port: u16, seq: u32, ack: u32, payload: &[u8]) {
-        let Some(state) = self.connections.get_mut(&(ip, port)) else {
-            return;
+    fn process_ack(
+        ip: Ipv4Addr,
+        hdr: &TcpHdr,
+        payload: &[u8],
+
+        adapter: &A,
+        sender: &mut Sender,
+        connections: &mut Connections,
+        scanlings: &mut Scanlings<P>,
+        parser: &P,
+        rng: &mut XorShiftRng,
+
+        max_reorder_bytes: usize,
+        max_reorder_segments: usize,
+
+        completer: &mut Completer
+    ) -> anyhow::Result<()> {
+        let source_port = hdr.dest_port.get();
+        let port = hdr.source_port.get();
+        let ack = hdr.ack.get();
+        let seq = hdr.seq.get();
+
+        let Some(state) = connections.get_mut(&(ip, port)) else {
+            adapter.on_empty(ip, port, rng);
+
+            sender.send::<{ TcpFlags::Rst }>(
+                ip,
+                source_port,
+                port,
+                ack,
+                seq.wrapping_add(payload.len() as u32),
+                completer
+            )?;
+
+            return Ok(());
         };
+
+        if ack != state.next_expected_ack {
+            trace!("ack with ack mismatch from {ip}:{port}; expected {} got {} (diff: {})", state.next_expected_ack, ack, (ack as isize).wrapping_sub(state.next_expected_ack as isize));
+
+            return Ok(());
+        }
+
+        if seq != state.next_expected_seq {
+            let diff = seq.wrapping_sub(state.next_expected_seq);
+            trace!("ack with seq mismatch from {ip}:{port}; expected {} got {} (diff: {diff})", state.next_expected_seq, seq);
+
+            if diff < 65535
+                && !payload.is_empty()
+                && state.reorder_buffer.len() < max_reorder_segments
+            {
+                let buffered_bytes: usize = state.reorder_buffer.values()
+                    .map(|v| v.len())
+                    .sum();
+
+                if buffered_bytes + payload.len() <= max_reorder_bytes {
+                    trace!("caching out-of-order segment from {ip}:{port} (seq: {seq}, len: {})", payload.len());
+
+                    state.reorder_buffer.insert(seq, payload.to_vec());
+                }
+            }
+
+            // send duplicate ack for retransmission
+            sender.send::<{ TcpFlags::Ack }>(
+                ip,
+                source_port,
+                port,
+                state.next_expected_ack,
+                state.next_expected_seq,
+                completer
+            )?;
+
+            return Ok(());
+        }
 
         if payload.is_empty() {
             trace!("ack without data from {ip}:{port}");
 
-            return;
-        }
-
-        if let Some(next_expected_ack) = state.next_expected_ack {
-            if ack != next_expected_ack {
-                trace!("ack cookie mismatch from {ip}:{port}");
-
-                return;
-            }
-
-            state.next_expected_ack = None;
-        } else if seq != state.next_expected_seq && state.fin_sent {
-            trace!("ack seq mismatch from {ip}:{port}");
-
-            self.sender.send(PacketTemplate::new(
-                // fin might've been dropped
-                TcpFlags::Fin | TcpFlags::Ack,
-                ip,
-                dest_port,
-                port,
-                ack,
-                state.next_expected_seq
-            ));
-
-            return;
+            return Ok(());
         }
 
         state.data.extend_from_slice(payload);
-        state.next_seq = Some(ack);
         state.next_expected_seq = seq.wrapping_add(payload.len() as u32);
 
         trace!("ack with data from {ip}:{port}");
 
-        match self.parser.parse(ip, port, &state.data) {
+        while let Some(buffered) = state.reorder_buffer.remove(&state.next_expected_seq) {
+            trace!("stitching buffered segment for {ip}:{port} (seq: {})", state.next_expected_seq);
+
+            state.next_expected_seq = state.next_expected_seq.wrapping_add(buffered.len() as u32);
+            state.data.extend_from_slice(&buffered);
+        }
+
+        match parser.parse(&state.data) {
             Ok(banner) => {
-                self.sender.shared.reward.fetch_add(10, Ordering::AcqRel);
-
-                self.sender.send(PacketTemplate::new(
-                    TcpFlags::Fin | TcpFlags::Ack,
+                let state = connections.remove(&(ip, port)).unwrap();
+                sender.send::<{ TcpFlags::Rst }>(
                     ip,
-                    dest_port,
+                    source_port,
                     port,
-                    ack,
-                    state.next_expected_seq
-                ));
+                    state.next_expected_ack,
+                    state.next_expected_seq,
+                    completer
+                )?;
 
-                state.fin_sent = true;
+                adapter.on_banner(ip, port, rng);
 
-                self.scanlings.push(Scanling::new(ip, port, banner));
+                scanlings.push(Scanling::new(ip, port, banner));
             }
 
             Err(ParseError::Invalid) => {
-                self.sender.shared.reward.fetch_sub(1, Ordering::AcqRel);
+                adapter.on_empty(ip, port, rng);
+
+                let state = connections.remove(&(ip, port)).unwrap();
+                sender.send::<{ TcpFlags::Rst }>(
+                    ip,
+                    source_port,
+                    port,
+                    state.next_expected_ack,
+                    state.next_expected_seq,
+                    completer
+                )?;
 
                 trace!("invalid data from {ip}:{port}, ignoring")
             }
 
             Err(ParseError::Incomplete) => {
-                self.sender.send(PacketTemplate::new(
-                    TcpFlags::Ack,
+                // we might have more data coming so we'll wait a bit longer
+                state.timestamp = Instant::now();
+                sender.send::<{ TcpFlags::Ack }>(
                     ip,
-                    dest_port,
+                    source_port,
                     port,
-                    ack,
-                    state.next_expected_seq
-                ));
+                    state.next_expected_ack,
+                    state.next_expected_seq,
+                    completer
+                )?;
             }
         };
+
+        Ok(())
+    }
+
+    fn process_fin(
+        ip: Ipv4Addr,
+        hdr: &TcpHdr,
+        payload: &[u8],
+
+        adapter: &A,
+        sender: &mut Sender,
+        connections: &mut Connections,
+        scanlings: &mut Scanlings<P>,
+        parser: &P,
+        rng: &mut XorShiftRng,
+
+        completer: &mut Completer
+    ) -> anyhow::Result<()> {
+        let source_port = hdr.dest_port.get();
+        let port = hdr.source_port.get();
+        let ack = hdr.ack.get();
+        let seq = hdr.seq.get();
+
+        // its joever
+        sender.send::<{ TcpFlags::Rst }>(
+            ip,
+            source_port,
+            port,
+            ack,
+            seq.wrapping_add(1).wrapping_add(payload.len() as u32),
+            completer
+        )?;
+
+        let mut state = match connections.remove(&(ip, port)) {
+            Some(state) => state,
+            None => {
+                trace!("fin from unknown or forgotten {ip}:{port}");
+
+                // maybe the adapter knows about it
+                adapter.on_empty(ip, port, rng);
+
+                return Ok(())
+            }
+        };
+
+        if payload.is_empty() {
+            trace!("fin from {ip}:{port}");
+
+            adapter.on_empty(ip, port, rng);
+
+            return Ok(())
+        }
+
+        trace!("fin with data from {ip}:{port}");
+
+        state.data.extend_from_slice(payload);
+        match parser.parse(&state.data) {
+            Ok(banner) => {
+                adapter.on_banner(ip, port, rng);
+
+                scanlings.push(Scanling::new(ip, port, banner))
+            },
+
+            Err(ParseError::Invalid) => {
+                adapter.on_empty(ip, port, rng);
+
+                trace!("invalid data from fin from {ip}:{port}, ignoring")
+            },
+
+            Err(ParseError::Incomplete) => {
+                adapter.on_empty(ip, port, rng);
+
+                trace!("incomplete data from fin from {ip}:{port}, ignoring")
+            }
+        };
+
+        Ok(())
+    }
+
+    #[inline]
+    pub(super) fn into_inner(self) -> (Receiver<'umem>, Sender<'umem>) {
+        (self.receiver, self.sender)
     }
 }

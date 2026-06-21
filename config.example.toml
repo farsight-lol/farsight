@@ -1,21 +1,50 @@
 [database]
-# todo
+# we're using clickhouse as our database.
+# the 5 fields below are creds or details to use to connect to the database.
+# use the command below to create a table:
+
+# ```
+# CREATE TABLE IF NOT EXISTS server_scans (
+#   timestamp DateTime64(3),
+#   ip IPv4,
+#   port UInt16,
+#   response String
+# ) ENGINE = MergeTree()
+# ORDER BY (ip, port, timestamp);
+# ```
+
+# change `server_scans` however you'd like,
+# but don't forget to change it in the table field here as well.
+
+url = "REPLACE-ME"
+table = "server_scans"
+
+user = ""
+password = ""
+database = ""
+
+# these fields dictate how cached often found servers should be written.
+flush_interval = 30 # if it's been at least N seconds since the last write, write.
+flush_capacity = 10 # if we have at least 10 objects cached, write.
 
 [controller]
 # the port range which we will scan from
 # to prohibit the kernel from closing the connections
 # run the following:
+
 # ```
 # sudo nft add table inet filter
 # sudo nft add chain inet filter output '{ type filter hook output priority 0; policy accept; }'
 # sudo nft add rule inet filter output ip protocol tcp tcp flags rst tcp sport <port_range_start>-<port_range_end> drop
 # ```
+
 # and to make it persistent, run the following:
+
 # ```
 # sudo nft list ruleset | sudo tee /etc/nftables.conf
 # sudo systemctl enable --now nftables
 # ```
-source_port_range = [42000, 43000]
+source_port = [42000, 43000]
 
 # the interface that the program will attach to
 # commands like "ip addr" or "nmcli d" help find the right interface
@@ -26,18 +55,53 @@ interface = "REPLACE-ME"
 print_every = 5
 
 # how many packets per second at max we're willing to send
+# higher values may mean more memory usage!
 max_rate = 300_000
 
-[session]
-# how much each scan session lasts at max, in seconds
-duration = 300
+[tcp]
+# sometimes tcp packets come to us in a shuffled order.
+# this part helps us un-shuffle them while also preventing memory abuse.
+# higher = more memory usage but fewer misses
+# lower = less memory usage but more misses
+max_reorder_segments = 8  # maximum count of shuffled packets we can hold
+max_reorder_bytes = 16384 # maximum bytes to hold in cache to un-shuffle when all data is received.
 
-[ping]
-# after how much seconds the connection will be dropped if there is no response
-# lower = more memory efficient but more misses
+[strategy]
+# probability of exploring, so trying random ports;
+# instead of exploiting, so using our knowledge to "guess" ports.
+# higher values may discover otherwise unknown port patterns, at the cost of wasting packets.
+epsilon = 0.05
+# how many distinct ports within one ip address will be tried within one session.
+# so kind of an intrusiveness control.
+budget_per_address = 100
+# ports we want to scan no matter what (don't leave this empty).
+seed_ports = [[25560, 25570]]
+# we keep track of ips. however we don't have infinite memory, so we need to clean them up.
+# after how much seconds the adapter stops keeping track of the ip.
+# higher = more memory usage but slightly better guessing
+# lower = less memory usage but slightly worse guessing
 timeout = 30
 
-# config for the slp parser
+[session]
+# how much each session lasts at max in seconds
+duration = 300
+
+rescan = {
+    # how many ips at max get queued to be scanned in every rescan session.
+    # higher = more memory usage but more diversity of ips
+    # lower = less memory usage but less diversity of ips
+    max_count = 10_000,
+    # probability of rescans occuring each session
+    epsilon = 0.10
+}
+
+[ping]
+# after how much seconds the connection will be dropped if there is no response.
+# higher = more memory usage but fewer misses
+# lower = less memory usage but more misses
+timeout = 30
+
+# slp payload
 slp = { host = "farsight", port = 1337, protocol_version = 47 }
 
 [xdp]
@@ -62,5 +126,5 @@ attach_mode = "skb"
 checksum_offload = false
 
 # ring sizes, change only if you know what you're doing.
-# higher values may increase memory usage but it also may improve performance
+# higher values may increase memory usage, but it also may improve performance.
 ring_size = 2048
