@@ -32,7 +32,6 @@ pub(super) struct Sender<'umem> {
 
     // just a tad bit more cache friendly
     checksum_offload: bool,
-    seed: u64
 }
 
 // optimized for our TCP_PACKET constant
@@ -104,7 +103,6 @@ impl<'umem> Sender<'umem> {
             ipv4_checksum: tcp::sum_body(&TCP_PACKET[14..34]) + source_ip_sum,
 
             checksum_offload: shared.config.xdp.checksum_offload,
-            seed: shared.seed,
 
             umem,
 
@@ -116,7 +114,7 @@ impl<'umem> Sender<'umem> {
     }
 
     #[inline]
-    pub(super) fn send_syn_batch(&mut self, packets: &[(u16, Ipv4Addr, u16)], completer: &mut Completer) -> anyhow::Result<()> {
+    pub(super) fn send_syn_batch(&mut self, packets: &[(u16, Ipv4Addr, u16)], seed: u64, completer: &mut Completer) -> anyhow::Result<()> {
         if packets.is_empty() {
             return Ok(());
         }
@@ -135,7 +133,7 @@ impl<'umem> Sender<'umem> {
 
         for (i, (src_port, ip, port)) in packets.iter().enumerate() {
             let index = index + i as u32;
-            let seq = cookie(ip, *port, self.seed);
+            let seq = cookie(ip, *port, seed);
 
             let desc = &mut self.tx[index];
 

@@ -1,11 +1,7 @@
 use crate::{
     controller::sender::Sender,
-    net::range::CompiledRanges,
 };
-use rand::{random, SeedableRng};
-use rand_xorshift::XorShiftRng;
-use std::{net::Ipv4Addr, sync::atomic::{AtomicU64}, thread};
-use std::sync::Arc;
+use std::{net::Ipv4Addr, thread};
 use std::time::{Duration, Instant};
 use crate::controller::completer::Completer;
 use crate::controller::strategy::adapter::Adapter;
@@ -19,7 +15,9 @@ pub(super) struct Scanner<'umem: 'b, 'b, A: Adapter> {
     last_refill: Instant,
 
     sender: Sender<'umem>,
-    rate: f64
+    rate: f64,
+    
+    seed: u64
 }
 
 impl<'umem: 'b, 'b, A: Adapter> Scanner<'umem, 'b, A> {
@@ -27,6 +25,7 @@ impl<'umem: 'b, 'b, A: Adapter> Scanner<'umem, 'b, A> {
     pub(super) fn new(
         sender: Sender<'umem>,
         adapter: &'b A,
+        seed: u64
     ) -> Self {
         Self {
             adapter,
@@ -38,6 +37,8 @@ impl<'umem: 'b, 'b, A: Adapter> Scanner<'umem, 'b, A> {
 
             rate: sender.shared.per_scanner_rate,
             sender,
+            
+            seed
         }
     }
 
@@ -66,7 +67,7 @@ impl<'umem: 'b, 'b, A: Adapter> Scanner<'umem, 'b, A> {
             }
         }
 
-        self.sender.send_syn_batch(&self.targets, completer).err()
+        self.sender.send_syn_batch(&self.targets, self.seed, completer).err()
     }
 
     #[inline]

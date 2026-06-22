@@ -120,9 +120,6 @@ impl<'umem> Controller<'umem> {
         xdp_program.attach_to_if_index(interface_index, config.xdp.attach_mode.to_flags())
             .context("attaching the XDP program - XDP is unsupported for your network driver. try experimenting with the xdp.mode and xdp.attach_mode options.")?;
 
-        let seed = random();
-        debug!("seed = {seed}");
-
         let flags = BindFlags::NeedWakeup | config.xdp.mode.to_flags();
 
         let usable_queue_count = umems.len();
@@ -132,7 +129,6 @@ impl<'umem> Controller<'umem> {
             interface_mac,
             config.controller.max_rate as f64 / usable_queue_count as f64,
             config,
-            seed,
         );
 
         let database = Database::new(shared.clone())

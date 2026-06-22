@@ -67,9 +67,10 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         adapter: &'b A,
         payload: &'b PA,
         parser: &'b P,
+        seed: u64
     ) -> Self {
         Self {
-            seed: sender.shared.seed,
+            seed,
             max_reorder_segments: sender.shared.config.tcp.max_reorder_segments,
             max_reorder_bytes: sender.shared.config.tcp.max_reorder_bytes,
             timeout: sender.shared.config.ping.timeout,
@@ -177,7 +178,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         if hdr.flags.contains(TcpFlags::Rst) {
             let port = hdr.source_port.get();
 
-            adapter.on_empty(ip, port, rng);
+            adapter.on_result::<false>(ip, port, rng);
             connections.remove(&(ip, port));
         } else if hdr.flags.contains(TcpFlags::Fin) {
             Self::process_fin(
@@ -253,7 +254,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         if ack != expected_ack {
             trace!("syn+ack with cookie mismatch from {ip}:{port}; expected {expected_ack} got {ack}");
 
-            adapter.on_empty(ip, port, rng);
+            adapter.on_result::<false>(ip, port, rng);
 
             return Ok(());
         }
@@ -273,7 +274,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
                     completer
                 )?;
 
-                adapter.on_empty(ip, port, rng);
+                adapter.on_result::<false>(ip, port, rng);
 
                 bail!("error building payload for {ip}:{port}, skipping: {err}")
             }
@@ -330,7 +331,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         let seq = hdr.seq.get();
 
         let Some(state) = connections.get_mut(&(ip, port)) else {
-            adapter.on_empty(ip, port, rng);
+            adapter.on_result::<false>(ip, port, rng);
 
             sender.send::<{ TcpFlags::Rst }>(
                 ip,
@@ -412,13 +413,13 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
                     completer
                 )?;
 
-                adapter.on_banner(ip, port, rng);
+                adapter.on_result::<true>(ip, port, rng);
 
                 scanlings.push(Scanling::new(ip, port, banner));
             }
 
             Err(ParseError::Invalid) => {
-                adapter.on_empty(ip, port, rng);
+                adapter.on_result::<false>(ip, port, rng);
 
                 let state = connections.remove(&(ip, port)).unwrap();
                 sender.send::<{ TcpFlags::Rst }>(
@@ -485,7 +486,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
                 trace!("fin from unknown or forgotten {ip}:{port}");
 
                 // maybe the adapter knows about it
-                adapter.on_empty(ip, port, rng);
+                adapter.on_result::<false>(ip, port, rng);
 
                 return Ok(())
             }
@@ -494,7 +495,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         if payload.is_empty() {
             trace!("fin from {ip}:{port}");
 
-            adapter.on_empty(ip, port, rng);
+            adapter.on_result::<false>(ip, port, rng);
 
             return Ok(())
         }
@@ -504,19 +505,19 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         state.data.extend_from_slice(payload);
         match parser.parse(&state.data) {
             Ok(banner) => {
-                adapter.on_banner(ip, port, rng);
+                adapter.on_result::<true>(ip, port, rng);
 
                 scanlings.push(Scanling::new(ip, port, banner))
             },
 
             Err(ParseError::Invalid) => {
-                adapter.on_empty(ip, port, rng);
+                adapter.on_result::<false>(ip, port, rng);
 
                 trace!("invalid data from fin from {ip}:{port}, ignoring")
             },
 
             Err(ParseError::Incomplete) => {
-                adapter.on_empty(ip, port, rng);
+                adapter.on_result::<false>(ip, port, rng);
 
                 trace!("incomplete data from fin from {ip}:{port}, ignoring")
             }

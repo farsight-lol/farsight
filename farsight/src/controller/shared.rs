@@ -5,7 +5,6 @@ use std::{
     sync::{
         Arc,
     },
-    time::Duration,
 };
 use crate::config::Config;
 
@@ -20,7 +19,6 @@ impl SharedData {
         interface: MacAddr,
         per_scanner_rate: f64,
         config: Config,
-        seed: u64,
     ) -> Self {
         Self(Arc::new(InnerSharedData {
             source_ip,
@@ -28,7 +26,6 @@ impl SharedData {
             interface,
             per_scanner_rate,
             config,
-            seed,
         }))
     }
 }
@@ -48,5 +45,4 @@ pub struct InnerSharedData {
     pub interface: MacAddr,
     pub per_scanner_rate: f64,
     pub config: Config,
-    pub seed: u64,
 }

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use crate::{
-    config::{DatabaseConfig},
     controller::{
         protocol::Parser,
     },
@@ -13,9 +12,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
+use clickhouse::sql::Identifier;
 use fxhash::FxHashSet;
 use crate::controller::shared::SharedData;
-use crate::controller::strategy::graph::BannerCorrelationGraph;
+use crate::controller::strategy::pmap::graph::BannerCorrelationGraph;
 
 #[derive(Debug, Serialize, Deserialize, Row)]
 pub struct Scanling<P: Parser> {
@@ -98,7 +98,7 @@ impl Database {
 
         let port_rows: Vec<(u16, u64)> = self.client
             .query("SELECT port, count(DISTINCT ip) AS cnt FROM ? GROUP BY port")
-            .bind(table)
+            .bind(Identifier(table))
             .fetch_all()
             .await?;
 
@@ -109,8 +109,8 @@ impl Database {
                     INNER JOIN ? b ON a.ip = b.ip \
                     WHERE a.port != b.port \
                     GROUP BY port_i, port_j")
-            .bind(table)
-            .bind(table)
+            .bind(Identifier(table))
+            .bind(Identifier(table))
             .fetch_all()
             .await?;
 
@@ -145,19 +145,19 @@ impl Database {
     #[inline]
     pub async fn read_ranges(&self, count: usize) -> anyhow::Result<Vec<Ipv4Addr>> {
         let mut fetch = self.client.query("SELECT ip FROM ? GROUP BY ip;")
-            .bind(&self.shared.config.database.table)
+            .bind(Identifier(&self.shared.config.database.table))
             .fetch::<u32>()
             .context("fetching from database")?;
-        
+
         let mut ranges = FxHashSet::default();
         while let Some(ip) = fetch.next().await? {
             ranges.insert(ip);
-            
-            if ranges.len() > count {
+
+            if ranges.len() >= count {
                 break;
             }
         }
-        
+
         Ok(ranges
             .into_iter()
             .map(Ipv4Addr::from)

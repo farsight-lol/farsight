@@ -25,7 +25,7 @@ use std::thread;
 use log::{debug, info, trace, warn};
 use rand::{random, RngExt, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use crate::controller::strategy::adapter::session::SessionAdapter;
+use crate::controller::strategy::adapter::pmap::PmapAdapter;
 use crate::controller::strategy::selector::{AllSelector, RescanSelector};
 use crate::net::nic::InterfaceInfoGuard;
 use crate::xdp::umem::Umem;
@@ -53,10 +53,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let queue_count = queues.current.combined;
     let core_count = thread::available_parallelism()
-        .context("error getting core count")?
+        .context("error getting available parallelism")?
         .get();
 
-    let usable_queue_count = ((core_count.saturating_sub(1)) / 2)
+    let usable_queue_count = core_count.saturating_sub(2)
         .max(1)
         .min(queue_count as usize) as u32;
 
@@ -126,7 +126,7 @@ async fn main() -> Result<(), anyhow::Error> {
         if rng.random_range(0f64..=1f64) >= epsilon {
             info!("scanning");
 
-            controller.session::<SessionAdapter>(
+            controller.session::<PmapAdapter>(
                 &seed_ports,
                 &excludes,
                 AllSelector
@@ -134,7 +134,7 @@ async fn main() -> Result<(), anyhow::Error> {
         } else {
             info!("rescanning");
 
-            controller.session::<SessionAdapter>(
+            controller.session::<PmapAdapter>(
                 &seed_ports,
                 &excludes,
                 rescan_selector.clone()

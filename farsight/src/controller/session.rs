@@ -21,7 +21,7 @@ use crate::controller::protocol::{Parser, Payload};
 use crate::controller::receiver::Receiver;
 use crate::controller::responder::Responder;
 use crate::controller::strategy::adapter::{Adapter};
-use crate::controller::strategy::graph::BannerCorrelationGraph;
+use crate::controller::strategy::pmap::graph::BannerCorrelationGraph;
 use crate::database::{Database, Scanling};
 use crate::xdp::ring::Consumer;
 
@@ -64,6 +64,9 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
         let done = AtomicBool::new(false);
 
         let queue = SegQueue::new();
+        
+        let seed = random();
+        debug!("chosen seed for this session = {seed}");
 
         thread::scope(|scope| {
             scope.spawn(|| {
@@ -88,6 +91,7 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
                         Scanner::new(
                             sender,
                             &self.adapter,
+                            seed
                         ),
 
                         Responder::new(
@@ -95,7 +99,8 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
                             sender_responder,
                             &self.adapter,
                             payload,
-                            parser
+                            parser,
+                            seed
                         ),
 
                         Completer::new(
@@ -112,8 +117,10 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
             let mut feeder_rng = XorShiftRng::from_seed(random());
 
             let start = Instant::now();
-            let rng = PerfectRng::new(self.ranges.count() as u64, self.shared.seed, 3);
+            let rng = PerfectRng::new(self.ranges.count() as u64, seed, 3);
 
+            // todo: consider adding adaptive scanning for ips as well
+            // todo: it should also probably discover port patterns without only only relying on seed ports
             loop {
                 if start.elapsed() >= duration {
                     break;
@@ -121,6 +128,12 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
 
                 if index >= self.ranges.count() as u64 {
                     break;
+                }
+
+                if self.adapter.is_at_capacity() {
+                    thread::sleep(Duration::from_millis(1));
+
+                    continue;
                 }
 
                 let shuffled = rng.shuffle(index) as usize;

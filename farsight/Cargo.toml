@@ -26,6 +26,7 @@ crossbeam-queue = "0.3"
 dashmap = "6"
 clickhouse = { version = "0.15", features = ["default", "chrono"] }
 chrono = "0.4"
+ordered-float = "5.3"
 fxhash = "0.2.1"
 rtnetlink = "0.21"
 surge-ping = "0.8"

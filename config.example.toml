@@ -92,7 +92,7 @@ rescan = {
     # lower = less memory usage but less diversity of ips
     max_count = 10_000,
     # probability of rescans occuring each session
-    epsilon = 0.10
+    epsilon = 0.005
 }
 
 [ping]
