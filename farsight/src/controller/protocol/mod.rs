@@ -2,6 +2,7 @@ use anyhow::Error;
 use serde::Serialize;
 use std::{net::Ipv4Addr, ops::Deref};
 use std::fmt::Debug;
+use std::hash::Hash;
 
 pub mod minecraft;
 
@@ -12,7 +13,7 @@ pub enum ParseError {
 }
 
 pub trait Parser: Send + Sync + Debug {
-    type Output: Sized + Send + Sync + Serialize + Debug;
+    type Output: Sized + Send + Sync + Serialize + Hash + Debug;
 
     fn parse(
         &'_ self,

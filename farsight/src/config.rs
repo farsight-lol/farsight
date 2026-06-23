@@ -23,8 +23,6 @@ pub struct ControllerConfig {
     pub source_port: PortRange,
     pub interface: String,
 
-    pub max_rate: u64,
-
     #[serde_as(as = "DurationSeconds<u64>")]
     pub print_every: Duration
 }
@@ -46,9 +44,13 @@ pub struct DatabaseConfig {
 #[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
+    pub max_rate: f64,
+    
     pub budget_per_address: u32,
     pub epsilon: EpsilonConfig,
-
+    
+    pub catchall_threshold: u8,
+    
     #[serde_as(as = "DurationSeconds<u64>")]
     pub timeout: Duration,
     pub seed_ports: Vec<PortRange>
@@ -95,9 +97,9 @@ impl PortRange {
 
     #[inline]
     pub fn sample(&self, rand: &mut impl rand::Rng) -> u16 {
-        match self {
-            PortRange::Range([start, end]) => rand.random_range(*start..=*end),
-            PortRange::Single(port) => *port
+        match *self {
+            PortRange::Range([start, end]) => rand.random_range(start..=end),
+            PortRange::Single(port) => port
         }
     }
 
@@ -118,17 +120,8 @@ impl PortRange {
     }
 }
 
-#[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct PingConfig {
-    #[serde_as(as = "DurationSeconds<u64>")]
-    pub timeout: Duration,
-
-    pub slp: SlpConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SlpConfig {
     pub host: String,
     pub port: u16,
     pub protocol_version: i32,

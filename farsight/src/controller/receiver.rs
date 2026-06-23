@@ -5,7 +5,7 @@ use crate::{
         socket::Socket,
     },
 };
-use anyhow::Context;
+use anyhow::{bail, Context};
 use libc::{XSK_UNALIGNED_BUF_ADDR_MASK, XSK_UNALIGNED_BUF_OFFSET_SHIFT};
 use std::slice::{from_raw_parts, from_raw_parts_mut};
 use std::sync::Arc;
@@ -37,10 +37,7 @@ impl<'umem> Receiver<'umem> {
         }
 
         fr.submit(size);
-
-        if fr.flags().needs_wakeup() {
-            socket.recvfrom().context("kicking fill ring")?;
-        }
+        socket.recvfrom().context("kicking fill ring")?;
 
         Ok(Self {
             umem,
@@ -57,12 +54,17 @@ impl<'umem> Receiver<'umem> {
             return Ok(None);
         };
 
-        if self.fr.flags().needs_wakeup() {
-            self.socket.recvfrom().context("kicking fill ring")?;
+        if self.fr.flags().needs_wakeup() && self.socket.recvfrom().is_err() {
+            self.rx.unpeek(count);
+
+            bail!("kicking fill ring")
         }
 
-        let fill_start = self.fr.reserve(count)
-            .context("reserving fill ring, leak somewhere?")?;
+        let Some(fill_start) = self.fr.reserve(count) else {
+            self.rx.unpeek(count);
+
+            bail!("reserving fill ring")
+        };
 
         Ok(Some(BatchGuard {
             umem: self.umem,
@@ -130,10 +132,8 @@ impl<'umem: 'c, 'c> Drop for BatchGuard<'umem, 'c> {
         self.rx.release(self.count);
         self.fr.submit(self.count);
 
-        if self.fr.flags().needs_wakeup() {
-            if let Err(err) = self.socket.recvfrom().context("kicking fill ring") {
-                error!("failed to kick fill ring: {}", err);
-            }
+        if self.fr.flags().needs_wakeup() && self.socket.recvfrom().is_err() {
+            error!("kicking fill ring")
         }
     }
 }

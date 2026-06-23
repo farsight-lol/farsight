@@ -54,10 +54,6 @@ interface = "REPLACE-ME"
 # per how many seconds the pps info gets printed
 print_every = 5
 
-# how many packets per second at max we're willing to send
-# higher values may mean more memory usage!
-max_rate = 300_000
-
 [tcp]
 # sometimes tcp packets come to us in a shuffled order.
 # this part helps us un-shuffle them while also preventing memory abuse.
@@ -67,12 +63,20 @@ max_reorder_segments = 8  # maximum count of shuffled packets we can hold
 max_reorder_bytes = 16384 # maximum bytes to hold in cache to un-shuffle when all data is received.
 
 [strategy]
+# this should roughly equal to count of packets sent per second,
+# but its really how many addresses at a time we keep track of at once
+# higher = more memory usage but fewer misses
+# lower = less memory usage but more misses
+max_rate = 30_000
 # probability of exploring, so trying random targets;
 # instead of exploiting, so using our knowledge to "guess" targets.
-# higher values may discover otherwise unknown patterns, at the cost of wasting packets.
+# higher = more packets and more intrusive but fewer misses
+# lower = less packets and less intrusive but more misses
 epsilon = { ip = 0.05, port = 0.05 }
 # how many distinct ports within one ip address will be tried within one session.
 # so kind of an intrusiveness control.
+# higher = more intrusive, more packets but fewer misses
+# lower = less intrusive, fewer packets but more misses
 budget_per_address = 100
 # ports that might contain server that we want to hint to the scanner
 seed_ports = [[25560, 25570]]
@@ -81,6 +85,10 @@ seed_ports = [[25560, 25570]]
 # higher = more memory usage but slightly better guessing
 # lower = less memory usage but slightly worse guessing
 timeout = 30
+# some ips have the same server on every port (mostly honeypots).
+# if we find this many servers with the same byte-for-byte response,
+# we'll simply stop looking any further.
+catchall_threshold = 5
 
 [session]
 # how much each session lasts at max in seconds
@@ -96,13 +104,10 @@ rescan = {
 }
 
 [ping]
-# after how much seconds the connection will be dropped if there is no response.
-# higher = more memory usage but fewer misses
-# lower = less memory usage but more misses
-timeout = 30
-
 # slp payload
-slp = { host = "farsight", port = 1337, protocol_version = 47 }
+host = "farsight"
+port = 1337
+protocol_version = 47
 
 [xdp]
 # use either "copy" or "zero-copy" to force a mode.

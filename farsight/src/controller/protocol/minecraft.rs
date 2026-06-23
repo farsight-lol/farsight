@@ -1,10 +1,8 @@
 use crate::{
     controller::protocol::{ParseError, Parser},
 };
-use serde::{Deserialize, Serialize};
 use std::{
     io::{Cursor, Read, Write},
-    net::Ipv4Addr,
 };
 
 #[derive(Debug, Default)]
@@ -36,6 +34,7 @@ impl Parser for SLPParser {
             return Err(ParseError::Incomplete);
         }
 
+        let status_buffer = &status_buffer[..response_length as usize];
         match serde_json::from_slice::<serde_json::Value>(status_buffer) {
             Ok(_) => Ok(String::from_utf8_lossy(status_buffer).to_string()),
             Err(_) => Err(ParseError::Invalid),

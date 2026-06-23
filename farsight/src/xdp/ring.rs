@@ -341,7 +341,6 @@ impl<T> From<Ring<T>> for Consumer<T> {
     }
 }
 
-//noinspection RsSuperTraitIsNotImplemented
 impl<T> Deref for Consumer<T> {
     type Target = Ring<T>;
 
@@ -381,6 +380,11 @@ impl<T> Consumer<T> {
         self.0.cached_cons += entries;
 
         Some((index, entries))
+    }
+
+    #[inline]
+    pub fn unpeek(&mut self, entries: u32) {
+        self.0.cached_cons -= entries;
     }
 
     #[inline]

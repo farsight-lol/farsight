@@ -1,4 +1,4 @@
-#![feature(ip_as_octets, adt_const_params, const_param_ty_trait, min_adt_const_params)]
+#![feature(ip_as_octets, adt_const_params, const_param_ty_trait, min_adt_const_params, likely_unlikely)]
 
 extern crate core;
 
@@ -22,16 +22,17 @@ use aya_log::EbpfLogger;
 use controller::protocol::minecraft::{build_latest_request, SLPParser};
 use std::io::Error;
 use std::thread;
+use futures::executor::block_on;
 use log::{debug, info, trace, warn};
 use rand::{random, RngExt, SeedableRng};
-use rand_xorshift::XorShiftRng;
+use rand_xoshiro::Xoshiro256Plus;
 use crate::controller::strategy::ip::pmap::PmapIpAdapter;
 use crate::controller::strategy::port::pmap::PmapPortAdapter;
-use crate::controller::strategy::selector::{AllSelector, RescanSelector};
+use crate::controller::strategy::selector::{AllSelector, RescanSelector, Selector};
 use crate::net::nic::InterfaceInfoGuard;
 use crate::xdp::umem::Umem;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), anyhow::Error> {
     env_logger::init();
 
@@ -53,11 +54,11 @@ async fn main() -> Result<(), anyhow::Error> {
     debug!("queues = {queues:?}");
 
     let queue_count = queues.current.combined;
-    let core_count = thread::available_parallelism()
+    let parallelism = thread::available_parallelism()
         .context("error getting available parallelism")?
         .get();
 
-    let usable_queue_count = core_count.saturating_sub(2)
+    let usable_queue_count = parallelism.saturating_sub(2)
         .max(1)
         .min(queue_count as usize) as u32;
 
@@ -96,9 +97,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let parser = SLPParser;
     let payload = build_latest_request(
-        &config.ping.slp.host,
-        config.ping.slp.port,
-        config.ping.slp.protocol_version,
+        &config.ping.host,
+        config.ping.port,
+        config.ping.protocol_version,
     );
 
     let seed_ports = config.strategy.seed_ports.iter()
@@ -107,6 +108,9 @@ async fn main() -> Result<(), anyhow::Error> {
         .into_iter()
         .collect::<Vec<_>>();
 
+    // we give each socket its own umem to avoid collision errors,
+    // and it's overall better for concurrency
+    // wastes a bit of memory tho
     let umems = (0..usable_queue_count)
         .map(|_| Umem::new(
             2048,
@@ -122,13 +126,12 @@ async fn main() -> Result<(), anyhow::Error> {
         .await
         .context("creating controller")?;
 
-    let mut rng = XorShiftRng::from_seed(random());
+    let mut rng = Xoshiro256Plus::from_seed(random());
     loop {
         let session = if rng.random_range(0f64..=1f64) >= epsilon {
             info!("scanning");
 
             controller.session::<PmapPortAdapter, PmapIpAdapter>(
-                &seed_ports,
                 &excludes,
                 AllSelector
             ).await
@@ -136,15 +139,19 @@ async fn main() -> Result<(), anyhow::Error> {
             info!("rescanning");
 
             controller.session::<PmapPortAdapter, PmapIpAdapter>(
-                &seed_ports,
                 &excludes,
                 rescan_selector.clone()
             ).await
         };
-        
+
         session
             .expect("creating session")
-            .start(duration, &payload, &parser)
+            .start(
+                duration,
+                &seed_ports,
+                &payload,
+                &parser
+            )
             .await
             .expect("starting session")
     }

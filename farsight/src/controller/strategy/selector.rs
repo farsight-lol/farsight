@@ -8,7 +8,7 @@ pub trait Selector {
 
 pub struct AllSelector;
 impl Selector for AllSelector {
-    #[inline]
+    #[inline(always)]
     async fn select(&self, _database: &mut Database) -> anyhow::Result<Ipv4Ranges> {
         Ok((Ipv4Addr::UNSPECIFIED..=Ipv4Addr::BROADCAST).into())
     }

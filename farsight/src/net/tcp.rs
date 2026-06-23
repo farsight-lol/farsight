@@ -42,9 +42,9 @@ pub static TCP_PACKET: [u8; 62] = [
     0, // [dst ip] : [30..34]
     // TCP : [34..62]
     0x00,
-    0x00, // [dst port] : [34..36]
+    0x00, // [src port] : [34..36]
     0x00,
-    0x00, // [src port] : [36..38]
+    0x00, // [dst port] : [36..38]
     0x00,
     0x00,
     0x00,

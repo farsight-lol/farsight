@@ -13,7 +13,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
 use clickhouse::sql::Identifier;
-use fxhash::{FxHashMap, FxHashSet};
+use fxhash::{FxHashMap};
 use crate::controller::shared::SharedData;
 use crate::controller::strategy::pmap::graph::banner::PortGraph;
 use crate::controller::strategy::pmap::graph::prefix::PrefixGraph;
@@ -64,7 +64,7 @@ impl Deref for Database {
 
 impl Database {
     #[inline]
-    pub async fn new(shared: SharedData) -> anyhow::Result<Self> {
+    pub fn new(shared: SharedData) -> anyhow::Result<Self> {
         let client = Client::default()
             .with_url(&shared.config.database.url)
             .with_user(&shared.config.database.user)
@@ -84,7 +84,7 @@ impl Database {
         let table = &self.shared.config.database.table;
         let total: u64 = self.client
             .query("SELECT count(DISTINCT ip) FROM ?")
-            .bind(table)
+            .bind(Identifier(table))
             .fetch_one()
             .await?;
 
@@ -93,7 +93,8 @@ impl Database {
                 HashMap::new(),
                 HashMap::new(),
                 0,
-                seed_ports
+                seed_ports,
+                self.shared.config.strategy.catchall_threshold
             ));
         }
 
@@ -123,7 +124,8 @@ impl Database {
             banner_counts,
             co_banner_counts,
             total,
-            seed_ports
+            seed_ports,
+            self.shared.config.strategy.catchall_threshold
         ))
     }
 
@@ -150,8 +152,11 @@ impl Database {
         &'_ self,
         rows: &[Scanling<P>],
     ) -> anyhow::Result<()> {
-        let mut insert = self.client.insert::<Scanling<P>>(&self.shared.config.database.table).await?;
+        if rows.is_empty() {
+            return Ok(());
+        }
 
+        let mut insert = self.client.insert::<Scanling<P>>(&self.shared.config.database.table).await?;
         for row in rows {
             insert.write(row).await?;
         }
@@ -168,18 +173,15 @@ impl Database {
             .fetch::<u32>()
             .context("fetching from database")?;
 
-        let mut ranges = FxHashSet::default();
+        let mut ranges = Vec::new();
         while let Some(ip) = fetch.next().await? {
-            ranges.insert(ip);
+            ranges.push(Ipv4Addr::from(ip));
 
             if ranges.len() >= count {
                 break;
             }
         }
 
-        Ok(ranges
-            .into_iter()
-            .map(Ipv4Addr::from)
-            .collect())
+        Ok(ranges)
     }
 }

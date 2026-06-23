@@ -9,6 +9,7 @@ pub mod shared;
 pub mod strategy;
 pub mod protocol;
 pub mod session;
+pub mod feeder;
 
 use crate::{
     config::{
@@ -128,17 +129,11 @@ impl<'umem> Controller<'umem> {
             source_ip,
             gateway_mac,
             interface_mac,
-            config.controller.max_rate as f64 / usable_queue_count as f64,
             config,
         );
 
         let database = Database::new(shared.clone())
-            .await
             .context("creating database")?;
-
-        // we give each socket its own umem to avoid collision errors,
-        // and it's overall better for concurrency
-        // wastes a bit of memory tho
 
         let mut saturators = Vec::with_capacity(usable_queue_count);
 
@@ -224,9 +219,8 @@ impl<'umem> Controller<'umem> {
     }
 
     #[inline]
-    pub async fn session<'b, A: PortAdapter, I: IpAdapter + 'b>(
+    pub async fn session<'b, A: PortAdapter + 'b, I: IpAdapter + 'b>(
         &'b mut self,
-        seed_ports: &[u16],
         excludes: &'b Ipv4Ranges,
         selector: impl Selector,
     ) -> anyhow::Result<Session<'umem, 'b, A, I>> {
@@ -240,8 +234,7 @@ impl<'umem> Controller<'umem> {
             self.shared.clone(),
             &mut self.database,
             &mut self.saturators,
-            ranges.compile(),
-            seed_ports
+            ranges.compile()
         ).await
     }
 }

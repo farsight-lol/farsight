@@ -17,14 +17,12 @@ impl SharedData {
         source_ip: Ipv4Addr,
         gateway: MacAddr,
         interface: MacAddr,
-        per_scanner_rate: f64,
         config: Config,
     ) -> Self {
         Self(Arc::new(InnerSharedData {
             source_ip,
             gateway,
             interface,
-            per_scanner_rate,
             config,
         }))
     }
@@ -43,6 +41,5 @@ pub struct InnerSharedData {
     pub source_ip: Ipv4Addr,
     pub gateway: MacAddr,
     pub interface: MacAddr,
-    pub per_scanner_rate: f64,
     pub config: Config,
 }

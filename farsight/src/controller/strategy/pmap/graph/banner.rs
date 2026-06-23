@@ -7,6 +7,8 @@ pub struct PortGraph {
     total: u64,
 
     recommendations: Vec<u16>,
+
+    pub(crate) threshold: u8
 }
 
 impl PortGraph {
@@ -15,6 +17,7 @@ impl PortGraph {
         co_banner_counts: HashMap<(u16, u16), u64>,
         total_addresses: u64,
         seed_ports: &[u16],
+        threshold: u8
     ) -> Self {
         let mut doubles: HashMap<u16, HashMap<u16, u64>> = HashMap::new();
         for ((i, j), count) in co_banner_counts {
@@ -38,6 +41,7 @@ impl PortGraph {
             doubles,
             total: total_addresses.max(1),
             recommendations,
+            threshold
         }
     }
 
@@ -73,5 +77,10 @@ impl PortGraph {
                 return Some(candidate);
             }
         }
+    }
+
+    #[inline]
+    pub fn explore_empty(&self, rng: &mut impl rand::Rng) -> u16 {
+        rng.random_range(1u16..=65535)
     }
 }

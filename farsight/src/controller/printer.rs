@@ -30,8 +30,8 @@ impl<'b> Printer<'b> {
     }
 
     #[inline]
-    pub(super) fn tick(&mut self) {
-        let elapsed = self.last.elapsed();
+    pub(super) fn tick(&mut self, now: Instant) {
+        let elapsed = now.duration_since(self.last);
         if elapsed < self.print_every {
             return;
         }
@@ -50,6 +50,6 @@ impl<'b> Printer<'b> {
         trace!("total completed: {comp}");
 
         self.last_comp = comp;
-        self.last = Instant::now();
+        self.last = now;
     }
 }

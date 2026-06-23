@@ -4,6 +4,10 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[profile.release]
+lto = true
+codegen-units = 1
+
 [dependencies]
 aya = { git = "https://github.com/aya-rs/aya", features = ["async_tokio"] }
 aya-log = { git = "https://github.com/aya-rs/aya" }
@@ -19,7 +23,7 @@ tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net"
 perfect_rand = "0.3"
 env_logger = "0.11"
 rand = "0.10"
-rand_xorshift = "0.5"
+rand_xoshiro = "0.8"
 strength_reduce = "0.2"
 serde_with = "3"
 crossbeam-queue = "0.3"

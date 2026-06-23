@@ -6,9 +6,8 @@ use std::{
 };
 use std::collections::HashSet;
 use std::hash::Hash;
-use strength_reduce::StrengthReducedUsize;
 
-pub type CompiledRanges = Ranges<Ipv4Addr, CompilationInfo, usize>;
+pub type CompiledRanges = Ranges<u32, CompilationInfo, usize>;
 pub type Ipv4Ranges = Ranges<Ipv4Addr>;
 
 pub struct CompilationInfo {
@@ -146,6 +145,11 @@ impl Ipv4Ranges {
                 - range.start.to_bits() as usize
                 + 1;
 
+            let range = RangeInclusive {
+                start: range.start.to_bits(),
+                last: range.last.to_bits(),
+            };
+
             ranges.push((
                 range,
                 CompilationInfo {
@@ -171,14 +175,14 @@ impl CompiledRanges {
     }
 
     #[inline]
-    pub fn index(&self, index: usize) -> Ipv4Addr {
+    pub fn index(&self, index: usize) -> u32 {
         let mut start = 0;
         let mut end = self.inner.len();
         
         while start < end {
             let mid = (start + end) / 2;
 
-            // SAFETY: guaranteed to be in range, no need for checks
+            // SAFETY: guaranteed to be in range
             let range = unsafe { self.inner.get_unchecked(mid) };
 
             if range.1.index + range.1.count <= index {
@@ -188,7 +192,7 @@ impl CompiledRanges {
             } else {
                 let addr = (index - range.1.index) as u32;
 
-                return Ipv4Addr::from_bits(range.0.start.to_bits() + addr);
+                return range.0.start + addr;
             }
         }
 

@@ -6,23 +6,24 @@ use crate::{
     net::range::CompiledRanges,
 };
 use perfect_rand::PerfectRng;
-use std::{sync::atomic::{AtomicBool, AtomicUsize, Ordering}, thread, time::Duration};
+use std::{mem, sync::atomic::{AtomicBool, AtomicUsize, Ordering}, thread, time::Duration};
 use std::iter::zip;
 use std::marker::PhantomData;
+use std::ops::{Add, Sub};
 use std::time::Instant;
 use anyhow::Context;
-use crossbeam_queue::SegQueue;
+use crossbeam_queue::{ArrayQueue, SegQueue};
 use futures::executor::block_on;
 use log::{debug, error, info};
 use rand::{random, SeedableRng};
-use rand_xorshift::XorShiftRng;
-use tokio::runtime::{Handle, Runtime, TryCurrentError};
+use tokio::runtime::{Builder, Handle, Runtime, TryCurrentError};
 use crate::controller::DestructedResponder;
+use crate::controller::feeder::Feeder;
 use crate::controller::protocol::{Parser, Payload};
 use crate::controller::receiver::Receiver;
 use crate::controller::responder::Responder;
 use crate::controller::strategy::ip::IpAdapter;
-use crate::controller::strategy::port::PortAdapter;
+use crate::controller::strategy::port::{PortExpirer, PortAdapter};
 use crate::database::{Database, Scanling};
 use crate::xdp::ring::Consumer;
 
@@ -32,8 +33,7 @@ pub struct Session<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> {
     saturators: &'b mut Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
     ranges: CompiledRanges,
 
-    port_adapter: A,
-    _phantom: PhantomData<&'b I>,
+    _phantom: PhantomData<(&'b A, &'b I)>,
 }
 
 impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
@@ -43,15 +43,8 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
         database: &'b mut Database,
         saturators: &'b mut Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
         ranges: CompiledRanges,
-        seed_ports: &[u16]
     ) -> Result<Self, anyhow::Error> {
         Ok(Self {
-            port_adapter: A::new(
-                shared.clone(),
-                database,
-                seed_ports
-            ).await.context("creating port adapter")?,
-
             database,
             shared,
             saturators,
@@ -62,16 +55,28 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
     }
 
     #[inline]
-    pub async fn start(self, duration: Duration, payload: &impl Payload, parser: &impl Parser) -> anyhow::Result<()> {
+    pub async fn start(
+        self,
+        duration: Duration,
+        seed_ports: &[u16],
+        payload: &impl Payload,
+        parser: &(impl Parser + 'static)
+    ) -> anyhow::Result<()> {
         info!("starting session");
 
         let completed = AtomicUsize::new(0);
         let done = AtomicBool::new(false);
 
-        let queue = SegQueue::new();
+        let queue = ArrayQueue::new(self.shared.config.xdp.ring_size as usize);
 
         let seed = random();
         debug!("chosen seed for this session = {seed}");
+
+        let port_adapter = A::new(
+            self.shared.clone(),
+            self.database,
+            seed_ports
+        ).await.context("creating port adapter")?;
 
         let ip_adapter = I::new(
             self.shared.clone(),
@@ -85,16 +90,17 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
                 let future = spawn_printer_and_database(
                     self.shared.clone(),
                     self.database,
-                    &self.port_adapter,
+                    port_adapter.create_expirer(),
                     &done,
                     &completed,
                     &queue
                 );
 
-                match Handle::try_current() {
-                    Ok(handle) => handle.block_on(future),
-                    Err(_) => Runtime::new().unwrap().block_on(future)
-                }
+                Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(future)
             });
 
             let handles: Vec<_> = self.saturators.drain(..)
@@ -102,14 +108,14 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
                     scope.spawn(|| spawn_saturator(
                         Scanner::new(
                             sender,
-                            &self.port_adapter,
+                            &port_adapter,
                             seed
                         ),
 
                         Responder::new(
                             receiver,
                             sender_responder,
-                            &self.port_adapter,
+                            &port_adapter,
                             &ip_adapter,
                             payload,
                             parser,
@@ -126,32 +132,23 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
                     ))
                 ).collect();
 
-            let mut feeder_rng = XorShiftRng::from_seed(random());
-
-            let start = Instant::now();
-            let mut index = 0;
+            let mut feeder = Feeder::new(
+                self.shared.clone(),
+                seed,
+                duration,
+                &port_adapter,
+                &ip_adapter
+            );
 
             loop {
-                if start.elapsed() >= duration {
+                if feeder.tick() {
                     break;
                 }
-
-                if self.port_adapter.is_at_capacity() {
-                    thread::sleep(Duration::from_millis(1));
-
-                    continue;
-                }
-
-                let Some(ip) = ip_adapter.next_address(&mut index, &mut feeder_rng) else {
-                    break;
-                };
-
-                self.port_adapter.enqueue_address(ip, &mut feeder_rng);
             }
 
             debug!("finished session; waiting for threads to finish up...");
 
-            thread::sleep(self.shared.config.ping.timeout);
+            thread::sleep(self.shared.config.strategy.timeout);
             done.store(true, Ordering::Release);
 
             for handle in handles {
@@ -170,41 +167,71 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
 async fn spawn_printer_and_database(
     shared: SharedData,
     database: &mut Database,
-    adapter: &impl PortAdapter,
+    mut expirer: impl PortExpirer,
     done: &AtomicBool,
     completed: &AtomicUsize,
-    queue: &SegQueue<Scanling<impl Parser>>
+    queue: &ArrayQueue<Scanling<impl Parser + 'static>>
 ) {
-    let mut batch = Vec::with_capacity(shared.config.database.flush_capacity);
-    let mut last_flush = Instant::now();
+    let flush_interval = shared.config.database.flush_interval;
+    let flush_capacity = shared.config.database.flush_capacity;
 
+    let mut batch = Vec::with_capacity(flush_capacity);
+
+    let mut last_flush = Instant::now();
     let mut printer = Printer::new(completed, shared.config.controller.print_every);
 
-    loop {
-        printer.tick();
+    let mut cached_now = None;
+    let mut ticks = 0u64;
 
-        if let Some(scanling) = queue.pop() {
-            debug!("hit: {scanling:?}");
+    let mut write_task = None;
+
+    loop {
+        while let Some(scanling) = queue.pop() {
+            debug!("HIT: {scanling:?}");
 
             batch.push(scanling);
         }
 
-        if batch.len() == batch.capacity() || (!batch.is_empty() && last_flush.elapsed() >= shared.config.database.flush_interval) {
-            if let Err(err) = database.write_many(&batch).await {
-                error!("error writing to database: {:?}", err);
-            } else {
-                info!("wrote {} to database", batch.len());
+        if batch.len() == batch.capacity()
+            || (!batch.is_empty() && last_flush.elapsed() >= flush_interval)
+        {
+            if let Some(handle) = write_task.take() {
+                let _ = handle.await;
             }
 
-            last_flush = Instant::now();
-            batch.clear();
+            let to_write = mem::replace(&mut batch, Vec::with_capacity(flush_capacity));
+            let database = database.clone();
+
+            write_task = Some(tokio::spawn(async move {
+                if let Err(err) = database.write_many(&to_write).await {
+                    error!("error writing to database: {:?}", err);
+                } else {
+                    info!("wrote {} to database", to_write.len());
+                }
+            }));
+
+            let now = Instant::now();
+            cached_now = Some(now);
+            last_flush = now;
         }
 
-        adapter.expire_timeouts();
+        ticks = ticks.wrapping_add(1);
+        if (ticks & 511) == 0 {
+            let now = cached_now.take().unwrap_or_else(Instant::now);
+
+            printer.tick(now);
+            expirer.expire(now, 4096);
+        }
+
+        tokio::task::yield_now().await;
 
         if done.load(Ordering::Acquire) {
             break;
         }
+    }
+
+    if let Some(handle) = write_task.take() {
+        let _ = handle.await;
     }
 
     while let Some(scanling) = queue.pop() {
@@ -223,7 +250,7 @@ fn spawn_saturator<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, P: Parser>(
     mut responder: Responder<'umem, 'b, A, I, impl Payload, P>,
     mut completer: Completer,
     done: &'b AtomicBool,
-    queue: &'b SegQueue<Scanling<P>>
+    queue: &'b ArrayQueue<Scanling<P>>
 ) -> (Sender<'umem>, DestructedResponder<'umem>) {
     loop {
         if let Some(error) = scanner.tick(&mut completer) {
@@ -236,7 +263,7 @@ fn spawn_saturator<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, P: Parser>(
         }
 
         for scanling in responder.scanlings.drain(..) {
-            queue.push(scanling);
+            queue.push(scanling).unwrap();
         }
 
         completer.tick();
