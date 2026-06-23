@@ -47,11 +47,18 @@ pub struct DatabaseConfig {
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
     pub budget_per_address: u32,
-    pub epsilon: f64,
+    pub epsilon: EpsilonConfig,
 
     #[serde_as(as = "DurationSeconds<u64>")]
     pub timeout: Duration,
     pub seed_ports: Vec<PortRange>
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize)]
+pub struct EpsilonConfig {
+    pub ip: f64,
+    pub port: f64,
 }
 
 #[serde_as]

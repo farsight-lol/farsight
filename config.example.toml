@@ -67,14 +67,14 @@ max_reorder_segments = 8  # maximum count of shuffled packets we can hold
 max_reorder_bytes = 16384 # maximum bytes to hold in cache to un-shuffle when all data is received.
 
 [strategy]
-# probability of exploring, so trying random ports;
-# instead of exploiting, so using our knowledge to "guess" ports.
-# higher values may discover otherwise unknown port patterns, at the cost of wasting packets.
-epsilon = 0.05
+# probability of exploring, so trying random targets;
+# instead of exploiting, so using our knowledge to "guess" targets.
+# higher values may discover otherwise unknown patterns, at the cost of wasting packets.
+epsilon = { ip = 0.05, port = 0.05 }
 # how many distinct ports within one ip address will be tried within one session.
 # so kind of an intrusiveness control.
 budget_per_address = 100
-# ports we want to scan no matter what (don't leave this empty).
+# ports that might contain server that we want to hint to the scanner
 seed_ports = [[25560, 25570]]
 # we keep track of ips. however we don't have infinite memory, so we need to clean them up.
 # after how much seconds the adapter stops keeping track of the ip.

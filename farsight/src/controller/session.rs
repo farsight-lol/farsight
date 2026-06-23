@@ -8,6 +8,7 @@ use crate::{
 use perfect_rand::PerfectRng;
 use std::{sync::atomic::{AtomicBool, AtomicUsize, Ordering}, thread, time::Duration};
 use std::iter::zip;
+use std::marker::PhantomData;
 use std::time::Instant;
 use anyhow::Context;
 use crossbeam_queue::SegQueue;
@@ -20,20 +21,22 @@ use crate::controller::DestructedResponder;
 use crate::controller::protocol::{Parser, Payload};
 use crate::controller::receiver::Receiver;
 use crate::controller::responder::Responder;
-use crate::controller::strategy::adapter::{Adapter};
-use crate::controller::strategy::pmap::graph::BannerCorrelationGraph;
+use crate::controller::strategy::ip::IpAdapter;
+use crate::controller::strategy::port::PortAdapter;
 use crate::database::{Database, Scanling};
 use crate::xdp::ring::Consumer;
 
-pub struct Session<'umem: 'b, 'b, A: Adapter> {
+pub struct Session<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> {
     shared: SharedData,
     database: &'b mut Database,
     saturators: &'b mut Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
     ranges: CompiledRanges,
-    adapter: A
+
+    port_adapter: A,
+    _phantom: PhantomData<&'b I>,
 }
 
-impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
+impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
     #[inline]
     pub(super) async fn new(
         shared: SharedData,
@@ -43,37 +46,46 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
         seed_ports: &[u16]
     ) -> Result<Self, anyhow::Error> {
         Ok(Self {
-            adapter: A::new(
+            port_adapter: A::new(
                 shared.clone(),
                 database,
                 seed_ports
-            ).await.context("creating adapter")?,
+            ).await.context("creating port adapter")?,
 
             database,
             shared,
             saturators,
             ranges,
+
+            _phantom: PhantomData,
         })
     }
 
     #[inline]
-    pub fn start(self, duration: Duration, payload: &impl Payload, parser: &impl Parser) {
+    pub async fn start(self, duration: Duration, payload: &impl Payload, parser: &impl Parser) -> anyhow::Result<()> {
         info!("starting session");
 
         let completed = AtomicUsize::new(0);
         let done = AtomicBool::new(false);
 
         let queue = SegQueue::new();
-        
+
         let seed = random();
         debug!("chosen seed for this session = {seed}");
+
+        let ip_adapter = I::new(
+            self.shared.clone(),
+            self.database,
+            self.ranges,
+            seed
+        ).await.context("creating ip adapter")?;
 
         thread::scope(|scope| {
             scope.spawn(|| {
                 let future = spawn_printer_and_database(
                     self.shared.clone(),
                     self.database,
-                    &self.adapter,
+                    &self.port_adapter,
                     &done,
                     &completed,
                     &queue
@@ -90,14 +102,15 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
                     scope.spawn(|| spawn_saturator(
                         Scanner::new(
                             sender,
-                            &self.adapter,
+                            &self.port_adapter,
                             seed
                         ),
 
                         Responder::new(
                             receiver,
                             sender_responder,
-                            &self.adapter,
+                            &self.port_adapter,
+                            &ip_adapter,
                             payload,
                             parser,
                             seed
@@ -113,35 +126,27 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
                     ))
                 ).collect();
 
-            let mut index = 0;
             let mut feeder_rng = XorShiftRng::from_seed(random());
 
             let start = Instant::now();
-            let rng = PerfectRng::new(self.ranges.count() as u64, seed, 3);
+            let mut index = 0;
 
-            // todo: consider adding adaptive scanning for ips as well
-            // todo: it should also probably discover port patterns without only only relying on seed ports
             loop {
                 if start.elapsed() >= duration {
                     break;
                 }
 
-                if index >= self.ranges.count() as u64 {
-                    break;
-                }
-
-                if self.adapter.is_at_capacity() {
+                if self.port_adapter.is_at_capacity() {
                     thread::sleep(Duration::from_millis(1));
 
                     continue;
                 }
 
-                let shuffled = rng.shuffle(index) as usize;
-                let ip = self.ranges.index(shuffled);
+                let Some(ip) = ip_adapter.next_address(&mut index, &mut feeder_rng) else {
+                    break;
+                };
 
-                self.adapter.enqueue_address(ip, &mut feeder_rng);
-
-                index += 1;
+                self.port_adapter.enqueue_address(ip, &mut feeder_rng);
             }
 
             debug!("finished session; waiting for threads to finish up...");
@@ -157,13 +162,15 @@ impl<'umem: 'b, 'b, A: Adapter> Session<'umem, 'b, A> {
         });
 
         info!("exiting session");
+
+        Ok(())
     }
 }
 
 async fn spawn_printer_and_database(
     shared: SharedData,
     database: &mut Database,
-    adapter: &impl Adapter,
+    adapter: &impl PortAdapter,
     done: &AtomicBool,
     completed: &AtomicUsize,
     queue: &SegQueue<Scanling<impl Parser>>
@@ -211,9 +218,9 @@ async fn spawn_printer_and_database(
     }
 }
 
-fn spawn_saturator<'umem: 'b, 'b, A: Adapter, P: Parser>(
+fn spawn_saturator<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, P: Parser>(
     mut scanner: Scanner<'umem, 'b, A>,
-    mut responder: Responder<'umem, 'b, A, impl Payload, P>,
+    mut responder: Responder<'umem, 'b, A, I, impl Payload, P>,
     mut completer: Completer,
     done: &'b AtomicBool,
     queue: &'b SegQueue<Scanling<P>>

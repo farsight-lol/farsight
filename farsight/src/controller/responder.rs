@@ -21,7 +21,8 @@ use rand::{random, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use zerocopy::{FromBytes};
 use crate::controller::completer::Completer;
-use crate::controller::strategy::adapter::Adapter;
+use crate::controller::strategy::ip::IpAdapter;
+use crate::controller::strategy::port::PortAdapter;
 use crate::net::tcp::TcpHdr;
 
 struct State {
@@ -38,8 +39,9 @@ struct State {
 type Connections = FxHashMap<(Ipv4Addr, u16), State>;
 type Scanlings<P> = Vec<Scanling<P>>;
 
-pub(super) struct Responder<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> {
-    adapter: &'b A,
+pub(super) struct Responder<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> {
+    port_adapter: &'b A,
+    ip_adapter: &'b I,
 
     payload: &'b PA,
     parser: &'b P,
@@ -59,12 +61,13 @@ pub(super) struct Responder<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> {
     timeout: Duration,
 }
 
-impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, PA, P> {
+impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, I, PA, P> {
     #[inline]
     pub(super) fn new(
         receiver: Receiver<'umem>,
         sender: Sender<'umem>,
-        adapter: &'b A,
+        port_adapter: &'b A,
+        ip_adapter: &'b I,
         payload: &'b PA,
         parser: &'b P,
         seed: u64
@@ -78,7 +81,9 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
             scanlings: Vec::with_capacity(sender.shared.config.xdp.ring_size as usize),
             rng: XorShiftRng::from_seed(random()),
 
-            adapter,
+            port_adapter,
+            ip_adapter,
+            
             payload,
 
             parser,
@@ -93,7 +98,8 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
     #[inline]
     pub(super) fn tick(&'_ mut self, completer: &mut Completer) -> anyhow::Result<()> {
         let Responder {
-            adapter,
+            port_adapter,
+            ip_adapter,
             receiver,
             payload,
             parser,
@@ -113,7 +119,8 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
 
         for data in data_batch {
             if let Err(err) = Self::process_packet(
-                adapter,
+                port_adapter,
+                ip_adapter,
                 payload,
                 parser,
                 sender,
@@ -138,6 +145,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
     #[inline]
     fn process_packet(
         adapter: &A,
+        ip_adapter: &I,
         payload: &PA,
         parser: &P,
         sender: &mut Sender,
@@ -187,6 +195,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
                 tcp_payload,
 
                 adapter,
+                ip_adapter,
                 sender,
                 connections,
                 scanlings,
@@ -216,6 +225,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
                 tcp_payload,
 
                 adapter,
+                ip_adapter,
                 sender,
                 connections,
                 scanlings,
@@ -313,7 +323,8 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         hdr: &TcpHdr,
         payload: &[u8],
 
-        adapter: &A,
+        port_adapter: &A,
+        ip_adapter: &I,
         sender: &mut Sender,
         connections: &mut Connections,
         scanlings: &mut Scanlings<P>,
@@ -331,7 +342,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         let seq = hdr.seq.get();
 
         let Some(state) = connections.get_mut(&(ip, port)) else {
-            adapter.on_result::<false>(ip, port, rng);
+            port_adapter.on_result::<false>(ip, port, rng);
 
             sender.send::<{ TcpFlags::Rst }>(
                 ip,
@@ -413,13 +424,14 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
                     completer
                 )?;
 
-                adapter.on_result::<true>(ip, port, rng);
+                ip_adapter.on_result(ip);
+                port_adapter.on_result::<true>(ip, port, rng);
 
                 scanlings.push(Scanling::new(ip, port, banner));
             }
 
             Err(ParseError::Invalid) => {
-                adapter.on_result::<false>(ip, port, rng);
+                port_adapter.on_result::<false>(ip, port, rng);
 
                 let state = connections.remove(&(ip, port)).unwrap();
                 sender.send::<{ TcpFlags::Rst }>(
@@ -457,6 +469,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         payload: &[u8],
 
         adapter: &A,
+        ip_adapter: &I,
         sender: &mut Sender,
         connections: &mut Connections,
         scanlings: &mut Scanlings<P>,
@@ -505,6 +518,7 @@ impl<'umem: 'b, 'b, A: Adapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, 
         state.data.extend_from_slice(payload);
         match parser.parse(&state.data) {
             Ok(banner) => {
+                ip_adapter.on_result(ip);
                 adapter.on_result::<true>(ip, port, rng);
 
                 scanlings.push(Scanling::new(ip, port, banner))

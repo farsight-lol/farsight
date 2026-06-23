@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use crate::config::PortRange;
 use crate::controller::shared::SharedData;
-use crate::controller::strategy::pmap::graph::BannerCorrelationGraph;
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use rand::RngExt;
@@ -11,16 +10,19 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use anyhow::Context;
+use fxhash::FxBuildHasher;
 use log::debug;
-use crate::controller::strategy::adapter::Adapter;
+use crate::controller::strategy::pmap::graph::banner::PortGraph;
+use crate::controller::strategy::pmap::graph::prefix::PrefixState;
 use crate::controller::strategy::pmap::heap::LazyHeap;
+use crate::controller::strategy::port::PortAdapter;
 use crate::database::Database;
 
-pub struct PmapAdapter {
+pub struct PmapPortAdapter {
     pending: SegQueue<(u16, Ipv4Addr, u16)>,
-    states: DashMap<Ipv4Addr, State>,
+    states: DashMap<Ipv4Addr, State, FxBuildHasher>,
 
-    graph: BannerCorrelationGraph,
+    graph: PortGraph,
 
     epsilon: f64,
     budget_per_address: usize,
@@ -34,7 +36,7 @@ pub struct PmapAdapter {
 
 struct State {
     tried_ports: HashSet<u16>,
-    heap: LazyHeap,
+    heap: LazyHeap<u16>,
     recommend_index: usize,
     budget_remaining: usize,
     started_at: Instant,
@@ -53,16 +55,17 @@ impl State {
     }
 
     #[inline]
-    fn prob(&self, graph: &BannerCorrelationGraph, port: u16) -> f64 {
+    fn prob(&self, graph: &PortGraph, port: u16) -> f64 {
         self.heap.query(port).unwrap_or_else(|| graph.base_prob(port))
     }
 
     #[inline]
-    fn next_port(&mut self, graph: &BannerCorrelationGraph) -> Option<u16> {
+    fn next_port(&mut self, graph: &PortGraph) -> Option<u16> {
         while let Some(port) = graph.recommend_at(self.recommend_index) {
             if !self.tried_ports.contains(&port) {
                 break;
             }
+
             self.recommend_index += 1;
         }
 
@@ -87,7 +90,7 @@ impl State {
     }
 
     #[inline]
-    fn record_result<const OPEN: bool>(&mut self, graph: &BannerCorrelationGraph, port: u16) {
+    fn record_result<const OPEN: bool>(&mut self, graph: &PortGraph, port: u16) {
         self.tried_ports.insert(port);
 
         if !OPEN {
@@ -113,7 +116,7 @@ impl State {
     }
 }
 
-impl Adapter for PmapAdapter {
+impl PortAdapter for PmapPortAdapter {
     #[inline]
     async fn new(
         shared: SharedData,
@@ -139,11 +142,11 @@ impl Adapter for PmapAdapter {
 
         Ok(Self {
             pending: SegQueue::new(),
-            states: DashMap::new(),
+            states: DashMap::default(),
 
             graph,
 
-            epsilon: shared.config.strategy.epsilon,
+            epsilon: shared.config.strategy.epsilon.port,
             budget_per_address: shared.config.strategy.budget_per_address as usize,
             source_port: shared.config.controller.source_port,
             timeout,
@@ -155,30 +158,27 @@ impl Adapter for PmapAdapter {
     }
 
     #[inline]
-    fn enqueue_address(&self, addr: Ipv4Addr, rng: &mut XorShiftRng) {
+    fn enqueue_address(&self, addr: Ipv4Addr, rng: &mut impl rand::Rng) {
         let mut state = State::new(self.budget_per_address);
 
-        let port = if rng.random_range::<f64, _>(0f64..=1f64) < self.epsilon {
+        let explore = rng.random_range::<f64, _>(0f64..=1f64) < self.epsilon;
+        let port = if explore {
             self.graph.explore(&state.tried_ports, rng)
         } else {
             state.next_port(&self.graph)
+                .or_else(|| self.graph.explore(&state.tried_ports, rng))
         };
 
-        let Some(port) = port else {
-            return;
-        };
+        let Some(port) = port else { return };
 
         let source_port = self.source_port.sample(rng);
         self.pending.push((source_port, addr, port));
-
         self.states.insert(addr, state);
     }
 
     #[inline]
-    fn on_result<const OPEN: bool>(&self, addr: Ipv4Addr, port: u16, rng: &mut XorShiftRng) {
-        let Some(mut state) = self.states.get_mut(&addr) else {
-            return;
-        };
+    fn on_result<const OPEN: bool>(&self, addr: Ipv4Addr, port: u16, rng: &mut impl rand::Rng) {
+        let Some(mut state) = self.states.get_mut(&addr) else { return };
 
         if state.tried_ports.contains(&port) {
             return;
@@ -193,14 +193,15 @@ impl Adapter for PmapAdapter {
             return;
         }
 
-        let next = if rng.random_range::<f64, _>(0f64..=1f64) < self.epsilon {
+        let explore = rng.random_range::<f64, _>(0f64..=1f64) < self.epsilon;
+        let next = if explore {
             self.graph.explore(&state.tried_ports, rng)
         } else {
             state.next_port(&self.graph)
+                .or_else(|| self.graph.explore(&state.tried_ports, rng))
         };
 
         let Some(next_port) = next else {
-            // exhausted every candidate port for this address
             drop(state);
             self.states.remove(&addr);
             return;

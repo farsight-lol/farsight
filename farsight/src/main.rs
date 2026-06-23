@@ -25,7 +25,8 @@ use std::thread;
 use log::{debug, info, trace, warn};
 use rand::{random, RngExt, SeedableRng};
 use rand_xorshift::XorShiftRng;
-use crate::controller::strategy::adapter::pmap::PmapAdapter;
+use crate::controller::strategy::ip::pmap::PmapIpAdapter;
+use crate::controller::strategy::port::pmap::PmapPortAdapter;
 use crate::controller::strategy::selector::{AllSelector, RescanSelector};
 use crate::net::nic::InterfaceInfoGuard;
 use crate::xdp::umem::Umem;
@@ -123,10 +124,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let mut rng = XorShiftRng::from_seed(random());
     loop {
-        if rng.random_range(0f64..=1f64) >= epsilon {
+        let session = if rng.random_range(0f64..=1f64) >= epsilon {
             info!("scanning");
 
-            controller.session::<PmapAdapter>(
+            controller.session::<PmapPortAdapter, PmapIpAdapter>(
                 &seed_ports,
                 &excludes,
                 AllSelector
@@ -134,13 +135,18 @@ async fn main() -> Result<(), anyhow::Error> {
         } else {
             info!("rescanning");
 
-            controller.session::<PmapAdapter>(
+            controller.session::<PmapPortAdapter, PmapIpAdapter>(
                 &seed_ports,
                 &excludes,
                 rescan_selector.clone()
             ).await
-        }.expect("creating session")
-            .start(duration, &payload, &parser);
+        };
+        
+        session
+            .expect("creating session")
+            .start(duration, &payload, &parser)
+            .await
+            .expect("starting session")
     }
 
     Ok(())

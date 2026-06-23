@@ -1,17 +1,18 @@
 use std::collections::BinaryHeap;
+use std::hash::Hash;
 use fxhash::FxHashMap;
 use ordered_float::OrderedFloat;
 
 #[derive(Default)]
-pub struct LazyHeap {
-    values: FxHashMap<u16, f64>,
-    current: BinaryHeap<(OrderedFloat<f64>, u16)>,
-    stale: BinaryHeap<(OrderedFloat<f64>, u16)>,
+pub struct LazyHeap<K: Copy + Eq + Hash + Ord> {
+    values: FxHashMap<K, f64>,
+    current: BinaryHeap<(OrderedFloat<f64>, K)>,
+    stale: BinaryHeap<(OrderedFloat<f64>, K)>,
 }
 
-impl LazyHeap {
+impl<K: Copy + Eq + Hash + Ord> LazyHeap<K> {
     #[inline]
-    pub fn top(&mut self) -> Option<u16> {
+    pub fn top(&mut self) -> Option<K> {
         loop {
             match (self.current.peek(), self.stale.peek()) {
                 (Some(&a), Some(&b)) if a == b => {
@@ -33,17 +34,17 @@ impl LazyHeap {
     }
 
     #[inline]
-    pub fn query(&self, port: u16) -> Option<f64> {
-        self.values.get(&port).copied()
+    pub fn query(&self, key: K) -> Option<f64> {
+        self.values.get(&key).copied()
     }
 
     #[inline]
-    pub fn update(&mut self, port: u16, value: f64) {
-        if let Some(&old) = self.values.get(&port) {
-            self.stale.push((OrderedFloat(old), port));
+    pub fn update(&mut self, key: K, value: f64) {
+        if let Some(&old) = self.values.get(&key) {
+            self.stale.push((OrderedFloat(old), key));
         }
 
-        self.values.insert(port, value);
-        self.current.push((OrderedFloat(value), port));
+        self.values.insert(key, value);
+        self.current.push((OrderedFloat(value), key));
     }
 }

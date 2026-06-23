@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use rand::prelude::{IteratorRandom};
+use rand::RngExt;
 
-pub struct BannerCorrelationGraph {
+pub struct PortGraph {
     singles: HashMap<u16, u64>,
     doubles: HashMap<u16, HashMap<u16, u64>>,
     total: u64,
@@ -9,9 +9,9 @@ pub struct BannerCorrelationGraph {
     recommendations: Vec<u16>,
 }
 
-impl BannerCorrelationGraph {
+impl PortGraph {
     pub fn from_counts(
-        banner_counts: HashMap<u16, u64>,
+        singles: HashMap<u16, u64>,
         co_banner_counts: HashMap<(u16, u16), u64>,
         total_addresses: u64,
         seed_ports: &[u16],
@@ -21,7 +21,7 @@ impl BannerCorrelationGraph {
             doubles.entry(i).or_default().insert(j, count);
         }
 
-        let mut ordered: Vec<(u16, u64)> = banner_counts.iter().map(|(&p, &c)| (p, c)).collect();
+        let mut ordered: Vec<(u16, u64)> = singles.iter().map(|(&p, &c)| (p, c)).collect();
         ordered.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
         let mut recommendations: Vec<u16> = ordered.into_iter().map(|(p, _)| p).collect();
@@ -34,10 +34,8 @@ impl BannerCorrelationGraph {
         }
 
         Self {
-            singles: banner_counts,
+            singles,
             doubles,
-            // floor at 1 to avoid division by zero; a cold-start graph (no
-            // history yet) just means every port's base probability is 0.
             total: total_addresses.max(1),
             recommendations,
         }
@@ -65,10 +63,15 @@ impl BannerCorrelationGraph {
 
     #[inline]
     pub fn explore(&self, tried: &HashSet<u16>, rng: &mut impl rand::Rng) -> Option<u16> {
-        self.recommendations
-            .iter()
-            .copied()
-            .filter(|port| !tried.contains(port))
-            .choose(rng)
+        if tried.len() >= 65535 {
+            return None; // i don't think this will ever be reached
+        }
+
+        loop {
+            let candidate = rng.random_range(1u16..=65535);
+            if !tried.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
     }
 }

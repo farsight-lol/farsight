@@ -13,9 +13,10 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clickhouse::{Client, Row};
 use clickhouse::sql::Identifier;
-use fxhash::FxHashSet;
+use fxhash::{FxHashMap, FxHashSet};
 use crate::controller::shared::SharedData;
-use crate::controller::strategy::pmap::graph::BannerCorrelationGraph;
+use crate::controller::strategy::pmap::graph::banner::PortGraph;
+use crate::controller::strategy::pmap::graph::prefix::PrefixGraph;
 
 #[derive(Debug, Serialize, Deserialize, Row)]
 pub struct Scanling<P: Parser> {
@@ -79,7 +80,7 @@ impl Database {
     }
 
     #[inline]
-    pub async fn build_graph(&self, seed_ports: &[u16]) -> Result<BannerCorrelationGraph, anyhow::Error> {
+    pub async fn build_graph(&self, seed_ports: &[u16]) -> Result<PortGraph, anyhow::Error> {
         let table = &self.shared.config.database.table;
         let total: u64 = self.client
             .query("SELECT count(DISTINCT ip) FROM ?")
@@ -88,7 +89,7 @@ impl Database {
             .await?;
 
         if total == 0 {
-            return Ok(BannerCorrelationGraph::from_counts(
+            return Ok(PortGraph::from_counts(
                 HashMap::new(),
                 HashMap::new(),
                 0,
@@ -118,12 +119,30 @@ impl Database {
             .map(|(i, j, c)| ((i, j), c))
             .collect();
 
-        Ok(BannerCorrelationGraph::from_counts(
+        Ok(PortGraph::from_counts(
             banner_counts,
             co_banner_counts,
             total,
             seed_ports
         ))
+    }
+
+    #[inline]
+    pub async fn build_prefix_graph(&self) -> anyhow::Result<PrefixGraph> {
+        let table = &self.shared.config.database.table;
+
+        let mut fetch = self.client
+            .query("SELECT ip, count() AS cnt FROM ? GROUP BY ip")
+            .bind(Identifier(table))
+            .fetch::<(u32, u64)>()
+            .context("fetching ip hit counts")?;
+
+        let mut prefix_hits = FxHashMap::default();
+        while let Some((ip, cnt)) = fetch.next().await? {
+            *prefix_hits.entry(ip >> 8).or_insert(0) += cnt;
+        }
+
+        Ok(PrefixGraph::from_counts(prefix_hits))
     }
 
     #[inline]

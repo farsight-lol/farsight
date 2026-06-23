@@ -1,9 +1,8 @@
 use crate::{cbail, xdp::socket::Socket};
 use anyhow::Context;
-use bitflags::bitflags;
 use libc::{
-    mmap, munmap, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE,
-    MAP_POPULATE, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE,
+    mmap, munmap, MAP_FAILED,
+    MAP_POPULATE, MAP_SHARED, PROT_READ, PROT_WRITE,
     SOL_XDP, XDP_MMAP_OFFSETS, XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING,
     XDP_RING_NEED_WAKEUP, XDP_RX_RING, XDP_TX_RING,
     XDP_UMEM_COMPLETION_RING, XDP_UMEM_FILL_RING, XDP_UMEM_PGOFF_COMPLETION_RING, XDP_UMEM_PGOFF_FILL_RING,
@@ -12,7 +11,6 @@ use std::{
     ops::{Deref, DerefMut, Index, IndexMut},
     os::fd::AsRawFd,
     ptr::{null_mut, NonNull},
-    slice::SliceIndex,
     sync::atomic::{AtomicU32, Ordering},
 };
 use strength_reduce::StrengthReducedU32;
@@ -285,7 +283,6 @@ impl<T> From<Ring<T>> for Producer<T> {
     }
 }
 
-//noinspection RsSuperTraitIsNotImplemented
 impl<T> Deref for Producer<T> {
     type Target = Ring<T>;
 
@@ -295,7 +292,6 @@ impl<T> Deref for Producer<T> {
     }
 }
 
-//noinspection RsSuperTraitIsNotImplemented
 impl<T> DerefMut for Producer<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -355,7 +351,6 @@ impl<T> Deref for Consumer<T> {
     }
 }
 
-//noinspection RsSuperTraitIsNotImplemented
 impl<T> DerefMut for Consumer<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {

@@ -4,9 +4,9 @@ use crate::{
 use std::{net::Ipv4Addr, thread};
 use std::time::{Duration, Instant};
 use crate::controller::completer::Completer;
-use crate::controller::strategy::adapter::Adapter;
+use crate::controller::strategy::port::PortAdapter;
 
-pub(super) struct Scanner<'umem: 'b, 'b, A: Adapter> {
+pub(super) struct Scanner<'umem: 'b, 'b, A: PortAdapter> {
     adapter: &'b A,
     
     targets: Vec<(u16, Ipv4Addr, u16)>,
@@ -20,7 +20,7 @@ pub(super) struct Scanner<'umem: 'b, 'b, A: Adapter> {
     seed: u64
 }
 
-impl<'umem: 'b, 'b, A: Adapter> Scanner<'umem, 'b, A> {
+impl<'umem: 'b, 'b, A: PortAdapter> Scanner<'umem, 'b, A> {
     #[inline]
     pub(super) fn new(
         sender: Sender<'umem>,

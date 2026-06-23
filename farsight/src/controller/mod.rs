@@ -47,7 +47,8 @@ use std::sync::RwLock;
 use crossbeam_queue::SegQueue;
 use crate::config::{Config, PingConfig, StrategyConfig};
 use crate::controller::printer::Printer;
-use crate::controller::strategy::adapter::{Adapter};
+use crate::controller::strategy::ip::IpAdapter;
+use crate::controller::strategy::port::PortAdapter;
 use crate::controller::strategy::selector::Selector;
 use crate::net::range::Ipv4Ranges;
 use crate::xdp::ring::Consumer;
@@ -223,12 +224,12 @@ impl<'umem> Controller<'umem> {
     }
 
     #[inline]
-    pub async fn session<A: Adapter>(
-        &'_ mut self,
+    pub async fn session<'b, A: PortAdapter, I: IpAdapter + 'b>(
+        &'b mut self,
         seed_ports: &[u16],
-        excludes: &'_ Ipv4Ranges,
+        excludes: &'b Ipv4Ranges,
         selector: impl Selector,
-    ) -> anyhow::Result<Session<'umem, '_, A>> {
+    ) -> anyhow::Result<Session<'umem, 'b, A, I>> {
         let mut ranges = selector.select(
             &mut self.database
         ).await.context("selecting ranges")?;
