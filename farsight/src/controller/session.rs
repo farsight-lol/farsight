@@ -67,7 +67,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
         let completed = AtomicUsize::new(0);
         let done = AtomicBool::new(false);
 
-        let queue = ArrayQueue::new(self.shared.config.xdp.ring_size as usize);
+        let queue = SegQueue::new();
 
         let seed = random();
         debug!("chosen seed for this session = {seed}");
@@ -170,7 +170,7 @@ async fn spawn_printer_and_database(
     mut expirer: impl PortExpirer,
     done: &AtomicBool,
     completed: &AtomicUsize,
-    queue: &ArrayQueue<Scanling<impl Parser + 'static>>
+    queue: &SegQueue<Scanling<impl Parser + 'static>>
 ) {
     let flush_interval = shared.config.database.flush_interval;
     let flush_capacity = shared.config.database.flush_capacity;
@@ -250,7 +250,7 @@ fn spawn_saturator<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, P: Parser>(
     mut responder: Responder<'umem, 'b, A, I, impl Payload, P>,
     mut completer: Completer,
     done: &'b AtomicBool,
-    queue: &'b ArrayQueue<Scanling<P>>
+    queue: &'b SegQueue<Scanling<P>>
 ) -> (Sender<'umem>, DestructedResponder<'umem>) {
     loop {
         if let Some(error) = scanner.tick(&mut completer) {
@@ -263,7 +263,7 @@ fn spawn_saturator<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, P: Parser>(
         }
 
         for scanling in responder.scanlings.drain(..) {
-            queue.push(scanling).unwrap();
+            queue.push(scanling);
         }
 
         completer.tick();
