@@ -24,7 +24,9 @@ pub struct ControllerConfig {
     pub interface: String,
 
     #[serde_as(as = "DurationSeconds<u64>")]
-    pub print_every: Duration
+    pub print_every: Duration,
+
+    pub max_rate: f64
 }
 
 #[serde_as]
@@ -44,15 +46,15 @@ pub struct DatabaseConfig {
 #[serde_as]
 #[derive(Debug, Deserialize)]
 pub struct StrategyConfig {
-    pub max_rate: f64,
+    pub max_in_flight: usize,
     
     pub budget_per_address: u32,
     pub epsilon: EpsilonConfig,
     
     pub catchall_threshold: u8,
-    
-    #[serde_as(as = "DurationSeconds<u64>")]
-    pub timeout: Duration,
+
+    pub timeout_batch: usize,
+
     pub seed_ports: Vec<PortRange>
 }
 
@@ -179,6 +181,22 @@ pub struct XdpConfig {
     pub checksum_offload: bool,
 
     pub ring_size: u32,
+
+    pub busy_polling: BusyPollingConfig,
+    pub batches: BatchesConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BusyPollingConfig {
+    pub enabled: bool,
+    pub microseconds: i32,
+    pub budget: i32
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchesConfig {
+    pub completion: u32,
+    pub rx: u32,
 }
 
 pub fn load(filename: &str) -> Result<Config, anyhow::Error> {

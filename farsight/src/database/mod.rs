@@ -182,6 +182,8 @@ impl Database {
             }
         }
 
+        ranges.sort_by_key(|range| *range);
+
         Ok(ranges)
     }
 }

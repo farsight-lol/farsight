@@ -26,6 +26,8 @@ rand = "0.10"
 rand_xoshiro = "0.8"
 strength_reduce = "0.2"
 serde_with = "3"
+crossbeam-utils = "0.8"
+crossbeam-epoch = "0.9"
 crossbeam-queue = "0.3"
 dashmap = "6"
 clickhouse = { version = "0.15", features = ["default", "chrono"] }

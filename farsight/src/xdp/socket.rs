@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::Context;
 use bitflags::bitflags;
-use libc::{bind, getsockopt, poll, pollfd, recvfrom, sendto, setsockopt, sockaddr_xdp, socket, AF_XDP, MSG_DONTWAIT, PF_XDP, SOCK_CLOEXEC, SOCK_RAW, SOL_SOCKET, SOL_XDP, SO_BUSY_POLL, SO_BUSY_POLL_BUDGET, SO_PREFER_BUSY_POLL, XDP_COPY, XDP_SHARED_UMEM, XDP_STATISTICS, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP, XDP_USE_SG, XDP_ZEROCOPY};
+use libc::{bind, getsockopt, recvfrom, sendto, setsockopt, sockaddr_xdp, socket, AF_XDP, MSG_DONTWAIT, PF_XDP, SOCK_CLOEXEC, SOCK_RAW, SOL_SOCKET, SOL_XDP, SO_BUSY_POLL, SO_BUSY_POLL_BUDGET, SO_PREFER_BUSY_POLL, XDP_COPY, XDP_SHARED_UMEM, XDP_STATISTICS, XDP_UMEM_REG, XDP_USE_NEED_WAKEUP, XDP_USE_SG, XDP_ZEROCOPY};
 use std::{
     io::Error,
     mem::MaybeUninit,
@@ -94,13 +94,13 @@ impl Socket {
     }
 
     #[inline]
-    pub fn set_busy_poll(&self) -> Result<(), anyhow::Error> {
+    pub fn set_busy_poll(&self, budget: i32, microseconds: i32) -> Result<(), anyhow::Error> {
         self.set_opt(SOL_SOCKET, SO_PREFER_BUSY_POLL, &1i32)
             .context("setting so_prefer_busy_poll")?;
-        self.set_opt(SOL_SOCKET, SO_BUSY_POLL, &1000i32)
-            .context("setting so_prefer_busy_poll")?;
-        self.set_opt(SOL_SOCKET, SO_BUSY_POLL_BUDGET, &8i32)
-            .context("setting so_prefer_busy_poll")?;
+        self.set_opt(SOL_SOCKET, SO_BUSY_POLL, &microseconds)
+            .context("setting so_busy_poll")?;
+        self.set_opt(SOL_SOCKET, SO_BUSY_POLL_BUDGET, &budget)
+            .context("setting so_busy_poll_budget")?;
 
         Ok(())
     }
@@ -117,36 +117,50 @@ impl Socket {
 
     #[inline]
     pub fn sendto(&self) -> Result<(), Error> {
-        cbail!(
-            unsafe {
-                sendto(
-                    self.as_raw_fd(),
-                    null_mut(),
-                    0,
-                    MSG_DONTWAIT,
-                    null_mut(),
-                    0,
-                )
-            } < 0
-        );
+        let ret = unsafe {
+            sendto(
+                self.as_raw_fd(),
+                null_mut(),
+                0,
+                MSG_DONTWAIT,
+                null_mut(),
+                0,
+            )
+        };
+
+        if ret < 0 {
+            let err = Error::last_os_error();
+
+            return match err.raw_os_error() {
+                Some(libc::EAGAIN) | Some(libc::EBUSY) | Some(libc::ENOBUFS) | Some(libc::ENETDOWN) => Ok(()),
+                _ => Err(err)
+            }
+        }
 
         Ok(())
     }
 
     #[inline]
     pub fn recvfrom(&self) -> Result<(), Error> {
-        cbail!(
-            unsafe {
-                recvfrom(
-                    self.as_raw_fd(),
-                    null_mut(),
-                    0,
-                    MSG_DONTWAIT,
-                    null_mut(),
-                    null_mut(),
-                )
-            } < 0
-        );
+        let ret = unsafe {
+            recvfrom(
+                self.as_raw_fd(),
+                null_mut(),
+                0,
+                MSG_DONTWAIT,
+                null_mut(),
+                null_mut(),
+            )
+        };
+
+        if ret < 0 {
+            let err = Error::last_os_error();
+
+            return match err.raw_os_error() {
+                Some(libc::EAGAIN) | Some(libc::EBUSY) | Some(libc::ENOBUFS) | Some(libc::ENETDOWN) => Ok(()),
+                _ => Err(err)
+            }
+        }
 
         Ok(())
     }

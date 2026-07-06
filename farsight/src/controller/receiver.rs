@@ -18,11 +18,14 @@ pub(super) struct Receiver<'umem> {
 
     fr: Producer<u64>,
     rx: Consumer<Descriptor>,
+    
+    batch_size: u32
 }
 
 impl<'umem> Receiver<'umem> {
     #[inline]
     pub(super) fn new(
+        shared: SharedData,
         umem: &'umem Umem,
         socket: Socket,
         mut fr: Producer<u64>,
@@ -45,12 +48,14 @@ impl<'umem> Receiver<'umem> {
 
             fr,
             rx,
+            
+            batch_size: shared.config.xdp.batches.rx
         })
     }
 
     #[inline]
     pub(super) fn receive(&mut self) -> Result<Option<BatchGuard<'umem, '_>>, anyhow::Error> {
-        let Some((rx_start, count)) = self.rx.peek(self.rx.size()) else {
+        let Some((rx_start, count)) = self.rx.peek(self.batch_size) else {
             return Ok(None);
         };
 

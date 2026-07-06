@@ -6,6 +6,7 @@ use std::{
         Arc,
     },
 };
+use std::time::Duration;
 use crate::config::Config;
 
 #[derive(Clone)]
@@ -18,12 +19,14 @@ impl SharedData {
         gateway: MacAddr,
         interface: MacAddr,
         config: Config,
+        timeout: Duration
     ) -> Self {
         Self(Arc::new(InnerSharedData {
             source_ip,
             gateway,
             interface,
             config,
+            timeout
         }))
     }
 }
@@ -42,4 +45,5 @@ pub struct InnerSharedData {
     pub gateway: MacAddr,
     pub interface: MacAddr,
     pub config: Config,
+    pub timeout: Duration,
 }

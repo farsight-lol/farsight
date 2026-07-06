@@ -15,7 +15,7 @@ use crate::{
 use fxhash::FxHashMap;
 use log::{debug, error, trace};
 use std::{net::Ipv4Addr, time::{Duration, Instant}};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::{Add, Sub};
 use anyhow::{bail};
 use rand::{random, SeedableRng};
@@ -39,6 +39,7 @@ struct State {
 
 type Connections = FxHashMap<(Ipv4Addr, u16), State>;
 type Scanlings<P> = Vec<Scanling<P>>;
+type Expiry = (Instant, (Ipv4Addr, u16));
 
 pub(super) struct Responder<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> {
     port_adapter: &'b A,
@@ -53,8 +54,8 @@ pub(super) struct Responder<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Pay
     connections: Connections,
     pub(super) scanlings: Scanlings<P>,
 
-    expiries: Vec<(Instant, Ipv4Addr, u16)>,
-    pending_expiry: Option<(Instant, Ipv4Addr, u16)>,
+    expiries: VecDeque<Expiry>,
+    pending_expiry: Option<Expiry>,
 
     rng: Xoshiro256PlusPlus,
 
@@ -79,7 +80,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
             seed,
             max_reorder_segments: sender.shared.config.tcp.max_reorder_segments,
             max_reorder_bytes: sender.shared.config.tcp.max_reorder_bytes,
-            timeout: sender.shared.config.strategy.timeout,
+            timeout: sender.shared.timeout,
 
             scanlings: Vec::with_capacity(sender.shared.config.xdp.ring_size as usize),
             rng: Xoshiro256PlusPlus::seed_from_u64(seed),
@@ -96,7 +97,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
 
             connections: FxHashMap::default(),
 
-            expiries: Vec::new(),
+            expiries: VecDeque::new(),
             pending_expiry: None,
         }
     }
@@ -133,6 +134,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                 parser,
                 sender,
                 connections,
+                expiries,
                 scanlings,
                 data,
                 rng,
@@ -148,21 +150,23 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
 
         let now = Instant::now();
         loop {
-            let (expires_at, addr, port) = match pending_expiry.take() {
+            let (expiry, key) = match pending_expiry.take() {
                 Some(e) => e,
-                None => match expiries.pop() {
+                None => match expiries.pop_front() {
                     Some(e) => e,
                     None => break,
                 },
             };
 
-            if expires_at > now {
-                *pending_expiry = Some((expires_at, addr, port));
+            if connections.contains_key(&key) {
+                if expiry > now {
+                    *pending_expiry = Some((expiry, key));
 
-                break;
+                    break;
+                }
+
+                connections.remove(&key);
             }
-
-            connections.remove(&(addr, port));
         }
 
         Ok(())
@@ -176,6 +180,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         parser: &P,
         sender: &mut Sender,
         connections: &mut FxHashMap<(Ipv4Addr, u16), State>,
+        expiries: &mut VecDeque<Expiry>,
         scanlings: &mut Vec<Scanling<P>>,
         data: &mut [u8],
         rng: &mut impl rand::Rng,
@@ -199,9 +204,14 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
             data.len()
         ); // to get rid of ethernet frame padding
 
-        let tcp_header_len = ((data[tcp_start + 12] & 0xF0) >> 2) as usize;
+        let data_start = tcp_start + ((data[tcp_start + 12] & 0xF0) >> 2) as usize;
+        if data_start > packet_end {
+            debug!("invalid packet data offset from {ip}");
 
-        let tcp_payload = &data[tcp_start + tcp_header_len..packet_end];
+            return Ok(());
+        }
+
+        let tcp_payload = &data[data_start..packet_end];
         let hdr = match TcpHdr::ref_from_bytes(&data[tcp_start..tcp_start + size_of::<TcpHdr>()]) {
             Ok(hdr) => hdr,
             Err(err) => {
@@ -213,7 +223,16 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         if hdr.flags.contains(TcpFlags::Rst) {
             let port = hdr.source_port.get();
 
-            adapter.on_result(ip, port, None, rng);
+            Self::record_empty(
+                adapter,
+                ip,
+                port,
+                seed,
+                rng,
+                sender,
+                completer
+            )?;
+
             connections.remove(&(ip, port));
         } else if hdr.flags.contains(TcpFlags::Fin) {
             Self::process_fin(
@@ -224,6 +243,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                 adapter,
                 ip_adapter,
                 sender,
+                seed,
                 connections,
                 scanlings,
                 parser,
@@ -239,6 +259,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                 adapter,
                 sender,
                 connections,
+                expiries,
                 payload,
                 rng,
                 timeout,
@@ -255,7 +276,9 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                 adapter,
                 ip_adapter,
                 sender,
+                seed,
                 connections,
+                expiries,
                 scanlings,
                 parser,
                 rng,
@@ -271,6 +294,43 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         Ok(())
     }
 
+    fn record_empty(
+        adapter: &A,
+        ip: Ipv4Addr,
+        port: u16,
+        seed: u64,
+        rng: &mut impl rand::Rng,
+        sender: &mut Sender,
+        completer: &mut Completer
+    ) -> anyhow::Result<()> {
+        let Some(template) = adapter.on_result(ip, port, None, rng) else {
+            return Ok(());
+        };
+
+        sender.send_syn(&template, seed, completer)?;
+
+        Ok(())
+    }
+
+    fn record_hit(
+        adapter: &A,
+        ip: Ipv4Addr,
+        port: u16,
+        seed: u64,
+        hash: u64,
+        rng: &mut impl rand::Rng,
+        sender: &mut Sender,
+        completer: &mut Completer
+    ) -> anyhow::Result<()> {
+        let Some(template) = adapter.on_result(ip, port, Some(hash), rng) else {
+            return Ok(());
+        };
+
+        sender.send_syn(&template, seed, completer)?;
+
+        Ok(())
+    }
+
     fn process_syn_ack(
         ip: Ipv4Addr,
         hdr: &TcpHdr,
@@ -278,6 +338,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         adapter: &A,
         sender: &mut Sender,
         connections: &mut Connections,
+        expiries: &mut VecDeque<Expiry>,
         payload: &PA,
         rng: &mut impl rand::Rng,
         timeout: Duration,
@@ -294,7 +355,15 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         if ack != expected_ack {
             trace!("syn+ack with cookie mismatch from {ip}:{port}; expected {expected_ack} got {ack}");
 
-            adapter.on_result(ip, port, None, rng);
+            Self::record_empty(
+                adapter,
+                ip,
+                port,
+                seed,
+                rng,
+                sender,
+                completer
+            )?;
 
             return Ok(());
         }
@@ -314,7 +383,15 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                     completer
                 )?;
 
-                adapter.on_result(ip, port, None, rng);
+                Self::record_empty(
+                    adapter,
+                    ip,
+                    port,
+                    seed,
+                    rng,
+                    sender,
+                    completer
+                )?;
 
                 bail!("error building payload for {ip}:{port}, skipping: {err}")
             }
@@ -331,6 +408,9 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
             completer
         )?;
 
+        let expires_at = Instant::now().add(timeout);
+
+        expiries.push_back((expires_at, (ip, port)));
         connections.insert(
             (ip, port),
             State {
@@ -340,8 +420,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                 next_expected_ack: ack.wrapping_add(payload.len() as u32),
 
                 reorder_buffer: BTreeMap::new(),
-
-                expires_at: Instant::now().add(timeout),
+                expires_at
             },
         );
 
@@ -356,7 +435,9 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         port_adapter: &A,
         ip_adapter: &I,
         sender: &mut Sender,
+        seed: u64,
         connections: &mut Connections,
+        expiries: &mut VecDeque<Expiry>,
         scanlings: &mut Scanlings<P>,
         parser: &P,
         rng: &mut impl rand::Rng,
@@ -373,7 +454,15 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         let seq = hdr.seq.get();
 
         let Some(state) = connections.get_mut(&(ip, port)) else {
-            port_adapter.on_result(ip, port, None, rng);
+            Self::record_empty(
+                port_adapter,
+                ip,
+                port,
+                seed,
+                rng,
+                sender,
+                completer
+            )?;
 
             sender.send::<{ TcpFlags::Rst }>(
                 ip,
@@ -456,13 +545,31 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                 )?;
 
                 ip_adapter.on_result(ip);
-                port_adapter.on_result(ip, port, Some(fxhash::hash64(&banner)), rng);
+
+                Self::record_hit(
+                    port_adapter,
+                    ip,
+                    port,
+                    seed,
+                    fxhash::hash64(&banner),
+                    rng,
+                    sender,
+                    completer
+                )?;
 
                 scanlings.push(Scanling::new(ip, port, banner));
             }
 
             Err(ParseError::Invalid) => {
-                port_adapter.on_result(ip, port, None, rng);
+                Self::record_empty(
+                    port_adapter,
+                    ip,
+                    port,
+                    seed,
+                    rng,
+                    sender,
+                    completer
+                )?;
 
                 let state = connections.remove(&(ip, port)).unwrap();
                 sender.send::<{ TcpFlags::Rst }>(
@@ -480,6 +587,8 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
             Err(ParseError::Incomplete) => {
                 // we might have more data coming so we'll wait a bit longer
                 state.expires_at += timeout;
+
+                expiries.push_back((state.expires_at, (ip, port)));
                 sender.send::<{ TcpFlags::Ack }>(
                     ip,
                     source_port,
@@ -502,6 +611,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         adapter: &A,
         ip_adapter: &I,
         sender: &mut Sender,
+        seed: u64,
         connections: &mut Connections,
         scanlings: &mut Scanlings<P>,
         parser: &P,
@@ -530,7 +640,15 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
                 trace!("fin from unknown or forgotten {ip}:{port}");
 
                 // maybe the adapter knows about it
-                adapter.on_result(ip, port, None, rng);
+                Self::record_empty(
+                    adapter,
+                    ip,
+                    port,
+                    seed,
+                    rng,
+                    sender,
+                    completer
+                )?;
 
                 return Ok(())
             }
@@ -539,7 +657,15 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         if payload.is_empty() {
             trace!("fin from {ip}:{port}");
 
-            adapter.on_result(ip, port, None, rng);
+            Self::record_empty(
+                adapter,
+                ip,
+                port,
+                seed,
+                rng,
+                sender,
+                completer
+            )?;
 
             return Ok(())
         }
@@ -550,19 +676,45 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
         match parser.parse(&state.data) {
             Ok(banner) => {
                 ip_adapter.on_result(ip);
-                adapter.on_result(ip, port, Some(fxhash::hash64(&banner)), rng);
+
+                Self::record_hit(
+                    adapter,
+                    ip,
+                    port,
+                    seed,
+                    fxhash::hash64(&banner),
+                    rng,
+                    sender,
+                    completer
+                )?;
 
                 scanlings.push(Scanling::new(ip, port, banner))
             },
 
             Err(ParseError::Invalid) => {
-                adapter.on_result(ip, port, None, rng);
+                Self::record_empty(
+                    adapter,
+                    ip,
+                    port,
+                    seed,
+                    rng,
+                    sender,
+                    completer
+                )?;
 
                 trace!("invalid data from fin from {ip}:{port}, ignoring")
             },
 
             Err(ParseError::Incomplete) => {
-                adapter.on_result(ip, port, None, rng);
+                Self::record_empty(
+                    adapter,
+                    ip,
+                    port,
+                    seed,
+                    rng,
+                    sender,
+                    completer
+                )?;
 
                 trace!("incomplete data from fin from {ip}:{port}, ignoring")
             }

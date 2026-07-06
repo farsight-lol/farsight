@@ -4,7 +4,6 @@ use std::{
     ,
     range::RangeInclusive,
 };
-use std::collections::HashSet;
 use std::hash::Hash;
 
 pub type CompiledRanges = Ranges<u32, CompilationInfo, usize>;
@@ -33,8 +32,6 @@ impl<T> From<Vec<T>> for Ranges<T, (), ()> where T: Hash + Eq + Clone {
     fn from(value: Vec<T>) -> Self {
         Self {
             inner: value.into_iter()
-                .collect::<HashSet<_>>()
-                .into_iter()
                 .map(|t| (RangeInclusive {
                     start: t.clone(),
                     last: t
@@ -169,7 +166,7 @@ impl Ipv4Ranges {
 }
 
 impl CompiledRanges {
-    #[inline]
+    #[inline(always)]
     pub const fn count(&self) -> usize {
         self.count
     }

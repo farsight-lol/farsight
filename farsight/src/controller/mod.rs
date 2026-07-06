@@ -10,6 +10,7 @@ pub mod strategy;
 pub mod protocol;
 pub mod session;
 pub mod feeder;
+pub mod worker;
 
 use crate::{
     config::{
@@ -124,16 +125,25 @@ impl<'umem> Controller<'umem> {
 
         let flags = BindFlags::NeedWakeup | config.xdp.mode.to_flags();
 
+        let timeout = Duration::from_secs_f64(config.strategy.max_in_flight as f64 / config.controller.max_rate)
+            .min(config.session.duration);
+
+        debug!("ping & strategy timeout = {timeout:?}");
+
         let usable_queue_count = umems.len();
         let shared = SharedData::new(
             source_ip,
             gateway_mac,
             interface_mac,
             config,
+            timeout
         );
 
         let database = Database::new(shared.clone())
             .context("creating database")?;
+
+        let ring_size = shared.config.xdp.ring_size;
+        let busy_polling = &shared.config.xdp.busy_polling;
 
         let mut saturators = Vec::with_capacity(usable_queue_count);
 
@@ -142,6 +152,11 @@ impl<'umem> Controller<'umem> {
             let umem = &umems[queue_id as usize];
 
             let socket = Socket::new().context("initializing socket")?;
+            if busy_polling.enabled {
+                socket.set_busy_poll(busy_polling.budget, busy_polling.microseconds)
+                    .context("setting busy poll")?;
+            }
+
             umem.bind(socket.clone())?;
 
             let (tx, fr, rx, cr) = {
@@ -149,10 +164,10 @@ impl<'umem> Controller<'umem> {
                     socket.rings().context("initializing ring allocator")?;
 
                 (
-                    allocator.tx(shared.config.xdp.ring_size).context("initializing tx ring")?,
-                    allocator.fr(shared.config.xdp.ring_size).context("initializing fr ring")?,
-                    allocator.rx(shared.config.xdp.ring_size).context("initializing rx ring")?,
-                    allocator.cr(shared.config.xdp.ring_size).context("initializing cr ring")?,
+                    allocator.tx(ring_size).context("initializing tx ring")?,
+                    allocator.fr(ring_size).context("initializing fr ring")?,
+                    allocator.rx(ring_size).context("initializing rx ring")?,
+                    allocator.cr(ring_size).context("initializing cr ring")?,
                 )
             };
 
@@ -173,12 +188,16 @@ impl<'umem> Controller<'umem> {
             ).context("initializing sender")?;
 
             let socket_shared = Socket::new().context("initializing socket")?;
+            if busy_polling.enabled {
+                socket_shared.set_busy_poll(busy_polling.budget, busy_polling.microseconds)
+                    .context("setting busy poll")?;
+            }
 
             let tx = {
                 let allocator =
                     socket_shared.rings().context("initializing ring allocator")?;
 
-                allocator.tx(shared.config.xdp.ring_size).context("initializing tx ring")?
+                allocator.tx(ring_size).context("initializing tx ring")?
             };
 
             socket_shared
@@ -189,6 +208,7 @@ impl<'umem> Controller<'umem> {
                 sender,
                 (
                     Receiver::new(
+                        shared.clone(),
                         umem,
                         socket.clone(),
                         fr,

@@ -47,17 +47,21 @@ impl<'a> Iterator for IfAddrs<'a> {
         }
 
         let ifaddrs = unsafe { &*self.next };
-        let addr = unsafe { &*ifaddrs.ifa_addr };
 
-        let addr: Option<Ipv4Addr> = if addr.sa_family == AF_INET as u16 {
-            Some(Ipv4Addr::from_octets(
-                unsafe { mem::transmute::<&sockaddr, &sockaddr_in>(addr) }
-                    .sin_addr
-                    .s_addr
-                    .to_ne_bytes(),
-            ))
-        } else {
+        let addr: Option<Ipv4Addr> = if ifaddrs.ifa_addr.is_null() {
             None
+        } else {
+            let addr = unsafe { &*ifaddrs.ifa_addr };
+            if addr.sa_family == AF_INET as u16 {
+                Some(Ipv4Addr::from_octets(
+                    unsafe { mem::transmute::<&sockaddr, &sockaddr_in>(addr) }
+                        .sin_addr
+                        .s_addr
+                        .to_ne_bytes(),
+                ))
+            } else {
+                None
+            }
         };
 
         let ifaddr = IfAddr {

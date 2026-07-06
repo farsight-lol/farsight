@@ -12,6 +12,8 @@ use crate::{
 };
 use libc::{XDP_TXMD_FLAGS_CHECKSUM, XDP_TX_METADATA};
 use std::{hint, net::Ipv4Addr, ptr};
+use std::mem::{ManuallyDrop, MaybeUninit};
+use std::ops::Deref;
 use std::sync::Arc;
 use anyhow::Context;
 use log::debug;
@@ -19,7 +21,26 @@ use zerocopy::FromBytes;
 use crate::controller::completer::Completer;
 use crate::xdp::umem::Umem;
 
-pub(super) struct Sender<'umem> {
+#[derive(Debug)]
+pub struct PacketTemplate {
+    source_port: u16,
+
+    ip: Ipv4Addr,
+    destination_port: u16,
+}
+
+impl PacketTemplate {
+    #[inline]
+    pub fn new(source_port: u16, ip: Ipv4Addr, destination_port: u16) -> Self {
+        Self {
+            source_port,
+            ip,
+            destination_port
+        }
+    }
+}
+
+pub struct Sender<'umem> {
     tcp_checksum: u32,
     ipv4_checksum: u32,
 
@@ -114,26 +135,25 @@ impl<'umem> Sender<'umem> {
     }
 
     #[inline]
-    pub(super) fn send_syn_batch(&mut self, packets: &[(u16, Ipv4Addr, u16)], seed: u64, completer: &mut Completer) -> anyhow::Result<()> {
-        if packets.is_empty() {
-            return Ok(());
-        }
-
+    pub(super) fn send_syn_batch(&mut self, packets: &mut Vec<PacketTemplate>, seed: u64, completer: &mut Completer) -> anyhow::Result<()> {
+        let batch_size = packets.len();
         let index = loop {
             if self.tx.flags().needs_wakeup() {
                 self.socket.sendto().context("waking up tx ring")?;
             }
 
-            if let Some(index) = self.tx.reserve(packets.len() as u32) {
+            if let Some(index) = self.tx.reserve(batch_size as u32) {
                 break index;
             }
 
             completer.tick();
         };
 
-        for (i, (src_port, ip, port)) in packets.iter().enumerate() {
+        for (i, packet) in packets.drain(..).enumerate() {
+            let PacketTemplate { source_port, ip, destination_port } = packet;
+
             let index = index + i as u32;
-            let seq = cookie(ip, *port, seed);
+            let seq = cookie(&ip, destination_port, seed);
 
             let desc = &mut self.tx[index];
 
@@ -151,26 +171,27 @@ impl<'umem> Sender<'umem> {
             hdr.dest_addr = ip.octets();
             hdr.ack.set(0);
             hdr.seq.set(seq);
+            hdr.len.set(48);
 
             let dest_sum = tcp::ipv4_sum(ip.as_octets());
 
-            hdr.dest_port.set(*port);
-            hdr.source_port.set(*src_port);
+            hdr.dest_port.set(destination_port);
+            hdr.source_port.set(source_port);
             hdr.ip_checksum.set(!fold(self.ipv4_checksum + dest_sum));
 
-            // branch prediction gets rid of this pretty quickly
             hdr.tcp_checksum.set(
+                // branch prediction gets rid of this pretty quickly
                 if self.checksum_offload {
                     fold(self.tcp_checksum + dest_sum)
                 } else {
                     !fold(
                         self.tcp_checksum
                             + dest_sum
-                            + *src_port as u32
-                            + *port as u32
+                            + source_port as u32
+                            + destination_port as u32
                             + (seq >> 16)
                             + (seq & 0xFFFF)
-                            + 0x0002
+                            + 0b00000010
                     )
                 }
             );
@@ -178,8 +199,81 @@ impl<'umem> Sender<'umem> {
             hdr.flags = TcpFlags::Syn;
         }
 
-        self.tx.submit(packets.len() as u32);
+        self.tx.submit(batch_size as u32);
+        if self.tx.flags().needs_wakeup() {
+            self.socket.sendto().context("waking up tx ring")?;
+        }
 
+        Ok(())
+    }
+
+    #[inline]
+    pub(super) fn send_syn(&mut self, packet: &PacketTemplate, seed: u64, completer: &mut Completer) -> anyhow::Result<()> {
+        let index = loop {
+            if self.tx.flags().needs_wakeup() {
+                self.socket.sendto().context("waking up tx ring")?;
+            }
+
+            if let Some(index) = self.tx.reserve(1) {
+                break index;
+            }
+
+            completer.tick();
+        };
+
+        let &PacketTemplate {
+            source_port,
+            ip,
+            destination_port
+        } = packet;
+
+        let seq = cookie(&ip, destination_port, seed);
+
+        let desc = &mut self.tx[index];
+
+        let data = self.umem.of_desc(desc);
+        let hdr = match EthTcpIpHdr::mut_from_bytes(&mut data[..size_of::<EthTcpIpHdr>()]) {
+            Ok(x) => x,
+            Err(err) => {
+                debug!("header cast failed: {err:?}");
+
+                return Ok(())
+            }
+        };
+
+        desc.len = 62;
+
+        hdr.dest_addr = ip.octets();
+        hdr.ack.set(0);
+        hdr.seq.set(seq);
+        hdr.len.set(48);
+
+        let dest_sum = tcp::ipv4_sum(ip.as_octets());
+
+        hdr.dest_port.set(destination_port);
+        hdr.source_port.set(source_port);
+        hdr.ip_checksum.set(!fold(self.ipv4_checksum + dest_sum));
+
+        hdr.tcp_checksum.set(
+            // branch prediction gets rid of this pretty quickly
+            if self.checksum_offload {
+                fold(self.tcp_checksum + dest_sum)
+            } else {
+                !fold(
+                    self.tcp_checksum
+                        + dest_sum
+                        + source_port as u32
+                        + destination_port as u32
+                        + (seq >> 16)
+                        + (seq & 0xFFFF)
+                        + 0b00000010
+                )
+            }
+        );
+
+        hdr.flags = TcpFlags::Syn;
+
+        self.tx.submit(1);
         if self.tx.flags().needs_wakeup() {
             self.socket.sendto().context("waking up tx ring")?;
         }
@@ -220,6 +314,8 @@ impl<'umem> Sender<'umem> {
         };
 
         desc.len = 62;
+        hdr.len.set(48);
+
         hdr.dest_addr = ip.octets();
         hdr.ack.set(ack);
         hdr.seq.set(seq);
@@ -326,7 +422,7 @@ impl<'umem> Sender<'umem> {
                         + (seq & 0xFFFF)
                         + (ack >> 16)
                         + (ack & 0xFFFF)
-                        + (TcpFlags::Psh | TcpFlags::Ack).bits() as u32
+                        + 0b00011000
                         + data_len as u32
                         + tcp::sum_body(body)
                 )

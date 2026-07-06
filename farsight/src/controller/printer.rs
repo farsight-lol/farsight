@@ -31,7 +31,7 @@ impl<'b> Printer<'b> {
 
     #[inline]
     pub(super) fn tick(&mut self, now: Instant) {
-        let elapsed = now.duration_since(self.last);
+        let elapsed = now - self.last;
         if elapsed < self.print_every {
             return;
         }

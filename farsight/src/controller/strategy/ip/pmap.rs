@@ -7,7 +7,7 @@ use rand::RngExt;
 use crate::controller::shared::SharedData;
 use crate::controller::strategy::ip::IpAdapter;
 use crate::controller::strategy::pmap::graph::prefix::{PrefixGraph, PrefixState};
-use crate::controller::strategy::pmap::heap::LazyHeap;
+use crate::controller::strategy::pmap::heap::{ConcurrentLazyHeap};
 use crate::database::Database;
 use crate::net::range::CompiledRanges;
 
@@ -17,7 +17,7 @@ pub struct PmapIpAdapter {
     rng: PerfectRng,
 
     graph: PrefixGraph,
-    heap: LazyHeap<u32>,
+    heap: ConcurrentLazyHeap<u32>,
     actives: DashMap<u32, PrefixState, FxBuildHasher>,
 
     epsilon: f64,

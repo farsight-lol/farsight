@@ -5,7 +5,7 @@
 
 # ```
 # CREATE TABLE IF NOT EXISTS server_scans (
-#   timestamp DateTime64(3),
+#   timestamp DateTime64(3, 'UTC'),
 #   ip IPv4,
 #   port UInt16,
 #   response String
@@ -54,6 +54,9 @@ interface = "REPLACE-ME"
 # per how many seconds the pps info gets printed
 print_every = 5
 
+# how many packets per second at max we want to send
+max_rate = 3_000
+
 [tcp]
 # sometimes tcp packets come to us in a shuffled order.
 # this part helps us un-shuffle them while also preventing memory abuse.
@@ -63,11 +66,10 @@ max_reorder_segments = 8  # maximum count of shuffled packets we can hold
 max_reorder_bytes = 16384 # maximum bytes to hold in cache to un-shuffle when all data is received.
 
 [strategy]
-# this should roughly equal to count of packets sent per second,
-# but its really how many addresses at a time we keep track of at once
+# how many addresses at a time we keep track of at once
 # higher = more memory usage but fewer misses
 # lower = less memory usage but more misses
-max_rate = 30_000
+max_in_flight = 1_000_000
 # probability of exploring, so trying random targets;
 # instead of exploiting, so using our knowledge to "guess" targets.
 # higher = more packets and more intrusive but fewer misses
@@ -80,11 +82,8 @@ epsilon = { ip = 0.05, port = 0.05 }
 budget_per_address = 100
 # ports that might contain server that we want to hint to the scanner
 seed_ports = [[25560, 25570]]
-# we keep track of ips. however we don't have infinite memory, so we need to clean them up.
-# after how much seconds the adapter stops keeping track of the ip.
-# higher = more memory usage but slightly better guessing
-# lower = less memory usage but slightly worse guessing
-timeout = 30
+# how many ips at once at max we expire, tune however you'd like.
+timeout_batch = 4096
 # some ips have the same server on every port (mostly honeypots).
 # if we find this many servers with the same byte-for-byte response,
 # we'll simply stop looking any further.
@@ -131,5 +130,14 @@ attach_mode = "skb"
 checksum_offload = false
 
 # ring sizes, change only if you know what you're doing.
-# higher values may increase memory usage, but it also may improve performance.
+# higher values increase memory usage, but it also may improve performance.
 ring_size = 2048
+
+# this is highly driver-dependent, but tuning these settings may offer better performance.
+# tune however you'd like.
+busy_polling = { enabled = false, microseconds = 1000, budget = 100 }
+
+# these are maximum count of packets to be received, or sent in one batch at once.
+# these however may not be larger than `ring_size`, and it is favored if it's not *very* close to `ring_size`.
+# tune however you'd like.
+batches = { completion = 256, rx = 256 }

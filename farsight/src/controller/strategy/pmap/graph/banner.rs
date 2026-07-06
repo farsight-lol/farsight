@@ -72,7 +72,7 @@ impl PortGraph {
         }
 
         loop {
-            let candidate = rng.random_range(1u16..=65535);
+            let candidate = self.explore_empty(rng);
             if !tried.contains(&candidate) {
                 return Some(candidate);
             }

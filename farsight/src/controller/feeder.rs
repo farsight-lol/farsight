@@ -1,33 +1,36 @@
-use std::{hint, thread};
+use crate::controller::strategy::port::PortGenerationGuard;
+use crate::controller::strategy::port::PortGenerator;
 use std::time::{Duration, Instant};
+use crossbeam_epoch::Guard;
 use rand::{SeedableRng};
 use rand_xoshiro::{Xoshiro256Plus};
-use crate::controller::shared::SharedData;
+use crate::controller::sender::PacketTemplate;
 use crate::controller::strategy::ip::IpAdapter;
-use crate::controller::strategy::port::PortAdapter;
+use crate::controller::worker::Worker;
 
-pub struct Feeder<'b, A: PortAdapter, I: IpAdapter> {
+pub struct Feeder<'b, A: PortGenerator, I: IpAdapter> {
     rng: Xoshiro256Plus,
     index: u64,
 
     start: Instant,
 
-    rate: f64,
-    tokens: f64,
-    last_refill: Instant,
-
     duration: Duration,
-    port_adapter: &'b A,
+
+    port_guard: A,
     ip_adapter: &'b I,
+    
+    guard: Guard,
+
+    queue: &'b Worker<PacketTemplate>,
 }
 
-impl<'b, A: PortAdapter, I: IpAdapter> Feeder<'b, A, I> {
+impl<'b, A: PortGenerator, I: IpAdapter> Feeder<'b, A, I> {
     #[inline]
     pub fn new(
-        shared: SharedData,
         seed: u64,
         duration: Duration,
-        port_adapter: &'b A,
+        queue: &'b Worker<PacketTemplate>,
+        port_guard: A,
         ip_adapter: &'b I
     ) -> Self {
         Self {
@@ -36,31 +39,26 @@ impl<'b, A: PortAdapter, I: IpAdapter> Feeder<'b, A, I> {
 
             start: Instant::now(),
 
-            rate: shared.config.strategy.max_rate,
-            tokens: 0.0,
-            last_refill: Instant::now(),
-
             duration,
-            port_adapter,
-            ip_adapter
+
+            port_guard,
+            ip_adapter,
+            
+            guard: crossbeam_epoch::pin(),
+
+            queue,
         }
     }
 
     #[inline]
     pub(crate) fn tick(&mut self) -> bool {
-        if self.port_adapter.at_capacity() {
-            hint::spin_loop();
+        let Some(guard) = self.port_guard.guard() else {
+            return false;
+        };
 
-            return false
-        }
-
-        let pass = self.next_batch();
-        if self.last_refill.duration_since(self.start) >= self.duration {
-            return true;
-        }
-
-        if pass {
-            return false
+        let now = Instant::now();
+        if now - self.start >= self.duration {
+            return true
         }
 
         let addr = match self.ip_adapter.next_address(&mut self.index, &mut self.rng) {
@@ -68,34 +66,16 @@ impl<'b, A: PortAdapter, I: IpAdapter> Feeder<'b, A, I> {
             None => return true
         };
 
-        self.port_adapter.enqueue(addr, self.last_refill, &mut self.rng);
+        self.queue.push(
+            guard.generate(
+                addr, 
+                now, 
+                &mut self.rng,
+                &self.guard
+            ),
+            &self.guard
+        );
 
         false
-    }
-
-
-    #[inline]
-    fn next_batch(&mut self) -> bool {
-        loop {
-            let now = Instant::now();
-            let elapsed = now.duration_since(self.last_refill).as_secs_f64();
-            self.last_refill = now;
-
-            self.tokens = (self.tokens + elapsed * self.rate).min(1.0);
-
-            if self.tokens < 1.0 {
-                let need = 1.0 - self.tokens;
-                let wait = (need / self.rate).min(0.1);
-
-                thread::sleep(Duration::from_secs_f64(wait));
-
-                continue;
-            }
-
-            let take = self.tokens.floor();
-            self.tokens -= take;
-
-            return take as u64 == 0;
-        }
     }
 }

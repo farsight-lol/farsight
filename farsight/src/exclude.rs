@@ -20,12 +20,13 @@ fn parse(input: &str) -> anyhow::Result<Ipv4Ranges> {
             continue;
         }
 
+        // remove everything after the first #
+        let line = line.split('#').next().unwrap().trim();
+
         // can be either like 0.0.0.0-0.0.0.0 or 0.0.0.0/32
         let is_slash = line.contains('/');
         let is_hypen = line.contains('-');
 
-        // remove everything after the first #
-        let line = line.split('#').next().unwrap().trim();
         if is_slash && is_hypen {
             bail!("Invalid exclude range: {line} (cannot contain both - and /)")
         }
@@ -67,6 +68,8 @@ fn parse(input: &str) -> anyhow::Result<Ipv4Ranges> {
 
         ranges.push(range);
     }
+    
+    ranges.sort_by_key(|range| *range.start());
 
     Ok(ranges.into())
 }

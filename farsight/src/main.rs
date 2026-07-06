@@ -1,4 +1,4 @@
-#![feature(ip_as_octets, adt_const_params, const_param_ty_trait, min_adt_const_params, likely_unlikely)]
+#![feature(ip_as_octets, adt_const_params, const_param_ty_trait, min_adt_const_params, likely_unlikely, core_intrinsics)]
 
 extern crate core;
 
@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use crate::controller::{
     Controller,
 };
-use anyhow::Context;
+use anyhow::{bail, Context};
 use aya::{
     Btf,
     EbpfLoader,
@@ -23,7 +23,7 @@ use controller::protocol::minecraft::{build_latest_request, SLPParser};
 use std::io::Error;
 use std::thread;
 use futures::executor::block_on;
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use rand::{random, RngExt, SeedableRng};
 use rand_xoshiro::Xoshiro256Plus;
 use crate::controller::strategy::ip::pmap::PmapIpAdapter;
@@ -58,6 +58,18 @@ async fn main() -> Result<(), anyhow::Error> {
         .context("error getting available parallelism")?
         .get();
 
+    if queue_count == 0 {
+        let usable_queue_count = parallelism.saturating_sub(2)
+            .max(1)
+            .min(queues.max.combined as usize) as u32;
+
+        bail!(
+              "NIC reports 0 queues which means ; \
+              consider 'ethtool -L {} combined {}' to fix",
+              config.controller.interface, usable_queue_count
+            );
+    }
+
     let usable_queue_count = parallelism.saturating_sub(2)
         .max(1)
         .min(queue_count as usize) as u32;
@@ -67,7 +79,7 @@ async fn main() -> Result<(), anyhow::Error> {
         warn!(
               "NIC reports {} queues but only using {} to leave cores free for management/db; \
               consider 'ethtool -L {} combined {}' to match",
-              queue_count, usable_queue_count, config.controller.interface, usable_queue_count
+              queues.max.combined, queues.current.combined, config.controller.interface, usable_queue_count
             );
     }
 
@@ -144,8 +156,13 @@ async fn main() -> Result<(), anyhow::Error> {
             ).await
         };
 
-        session
-            .expect("creating session")
+        if let Err(err) = &session {
+            error!("error while creating session: {err}");
+
+            continue;
+        }
+
+        if let Err(err) = session.unwrap()
             .start(
                 duration,
                 &seed_ports,
@@ -153,10 +170,12 @@ async fn main() -> Result<(), anyhow::Error> {
                 &parser
             )
             .await
-            .expect("starting session")
-    }
+        {
+            error!("error while scanning: {err}");
 
-    Ok(())
+            continue;
+        };
+    }
 }
 
 fn set_resource_limit() -> Result<(), Error> {

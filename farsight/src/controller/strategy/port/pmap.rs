@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::hint::likely;
 use std::mem;
@@ -5,26 +6,26 @@ use crate::config::PortRange;
 use crate::controller::shared::SharedData;
 use crossbeam_queue::{ArrayQueue, SegQueue};
 use dashmap::DashMap;
-use rand::RngExt;
+use rand::{RngExt};
 use std::net::Ipv4Addr;
 use std::ops::{Add, Deref, Sub};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::Thread;
 use std::time::{Duration, Instant};
-use anyhow::Context;
+use anyhow::{anyhow, Context};
+use crossbeam_epoch::Guard;
+use crate::controller::worker::{Steal, Stealer, Worker};
 use fxhash::{FxBuildHasher, FxHashMap};
 use log::{debug, info, trace};
+use crate::controller::sender::PacketTemplate;
 use crate::controller::strategy::pmap::graph::banner::PortGraph;
 use crate::controller::strategy::pmap::heap::LazyHeap;
-use crate::controller::strategy::port::{PortExpirer, PortAdapter};
+use crate::controller::strategy::port::{PortExpirer, PortAdapter, PortGuard, PortGenerator, PortGenerationGuard};
 use crate::database::Database;
 
 pub struct PmapPortAdapter {
-    pending: SegQueue<(u16, Ipv4Addr, u16)>,
     states: DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
-
-    expiries: SegQueue<(Instant, Ipv4Addr)>,
-
     allocated_states: ArrayQueue<Box<State>>,
 
     graph: PortGraph,
@@ -33,10 +34,6 @@ pub struct PmapPortAdapter {
     budget_per_address: usize,
     source_port: PortRange,
     timeout: Duration,
-
-    in_flight_count: AtomicUsize,
-
-    max_in_flight: usize,
 }
 
 #[derive(Default, Debug)]
@@ -96,7 +93,7 @@ impl State {
     }
 
     #[inline]
-    fn record_banner(&mut self, graph: &PortGraph, port: u16, hash: u64) -> bool {
+    fn record_hit(&mut self, graph: &PortGraph, port: u16, hash: u64) -> bool {
         self.tried_ports.insert(port);
 
         let count = self.seen_responses
@@ -134,39 +131,144 @@ impl State {
     }
 }
 
-pub struct PmapExpirer<'b> {
+pub struct PmapPortGenerationGuard<'b> {
+    state: Box<State>,
+
     states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
-    allocated_states: &'b ArrayQueue<Box<State>>,
-    in_flight_count: &'b AtomicUsize,
-    expiries: &'b SegQueue<(Instant, Ipv4Addr)>,
-    pending: Option<(Instant, Ipv4Addr)>
+    expiries: &'b Worker<(Instant, Ipv4Addr)>,
+    graph: &'b PortGraph,
+
+    timeout: Duration,
+    source_port: PortRange,
+    epsilon: f64,
+    budget_per_address: usize,
 }
 
-impl PortExpirer for PmapExpirer<'_> {
+impl PortGenerationGuard for PmapPortGenerationGuard<'_> {
     #[inline]
-    fn expire(&mut self, now: Instant, batch_size: usize) {
-        let mut removed = 0;
-        for _ in 0..batch_size {
-            let (expires_at, addr) = match self.pending.take() {
+    fn generate(mut self, addr: Ipv4Addr, now: Instant, rng: &mut impl rand::Rng, guard: &Guard) -> PacketTemplate {
+        let exploit = rng.random_range::<f64, _>(0f64..=1f64) >= self.epsilon;
+        self.state.clear(usize::from(exploit), self.budget_per_address);
+
+        let port = if exploit {
+            self.graph.recommend_at(0)
+                .unwrap_or_else(|| self.graph.explore_empty(rng))
+        } else {
+            self.graph.explore_empty(rng)
+        };
+
+        self.states.insert(addr, self.state);
+        self.expiries.push((now.add(self.timeout), addr), guard);
+
+        let source_port = self.source_port.sample(rng);
+        PacketTemplate::new(source_port, addr, port)
+    }
+}
+
+pub struct PmapPortGenerator<'b> {
+    states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    allocated_states: &'b ArrayQueue<Box<State>>,
+    graph: &'b PortGraph,
+    expiries: &'b Worker<(Instant, Ipv4Addr)>,
+
+    timeout: Duration,
+    source_port: PortRange,
+    epsilon: f64,
+    budget_per_address: usize,
+}
+
+impl PortGenerator for PmapPortGenerator<'_> {
+    #[inline(always)]
+    fn guard(&self) -> Option<impl PortGenerationGuard> {
+        Some(PmapPortGenerationGuard {
+            state: self.allocated_states.pop()?,
+
+            states: self.states,
+            expiries: self.expiries,
+            graph: self.graph,
+
+            timeout: self.timeout,
+            source_port: self.source_port,
+            epsilon: self.epsilon,
+            budget_per_address: self.budget_per_address,
+        })
+    }
+}
+
+pub struct PmapPortGuard<'b> {
+    states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    allocated_states: &'b ArrayQueue<Box<State>>,
+    graph: &'b PortGraph,
+
+    expiries: Worker<(Instant, Ipv4Addr)>,
+
+    timeout: Duration,
+    source_port: PortRange,
+    epsilon: f64,
+    budget_per_address: usize,
+}
+
+impl PortGuard for PmapPortGuard<'_> {
+    #[inline(always)]
+    fn generator(&self) -> impl PortGenerator {
+        PmapPortGenerator {
+            states: self.states,
+            allocated_states: self.allocated_states,
+            graph: self.graph,
+            expiries: &self.expiries,
+
+            timeout: self.timeout,
+            source_port: self.source_port,
+            epsilon: self.epsilon,
+            budget_per_address: self.budget_per_address,
+        }
+    }
+
+    #[inline(always)]
+    fn expirer(&self, batch_size: usize) -> impl PortExpirer {
+        PmapPortExpirer {
+            states: self.states,
+            allocated_states: self.allocated_states,
+            expiries: self.expiries.stealer(),
+            pending: None,
+            batch_size,
+        }
+    }
+}
+
+pub struct PmapPortExpirer<'s: 'b, 'b> {
+    states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    allocated_states: &'b ArrayQueue<Box<State>>,
+
+    expiries: Stealer<'s, (Instant, Ipv4Addr)>,
+    pending: Option<(Instant, Ipv4Addr)>,
+    batch_size: usize
+}
+
+impl<'s: 'b, 'b> PortExpirer for PmapPortExpirer<'s, 'b> {
+    #[inline]
+    fn expire(&mut self, now: Instant, guard: &Guard) {
+        'f: for _ in 0..self.batch_size {
+            let (expires_at, key) = match self.pending.take() {
                 Some(e) => e,
-                None => match self.expiries.pop() {
-                    Some(e) => e,
-                    None => break,
+                None => loop {
+                    match self.expiries.steal(guard) {
+                        Steal::Empty => break 'f,
+                        Steal::Success(expiry) => break expiry,
+                        Steal::Retry => continue
+                    }
                 },
             };
 
             if expires_at > now {
-                self.pending = Some((expires_at, addr));
+                self.pending = Some((expires_at, key));
                 break;
             }
 
-            if let Some((_, state)) = self.states.remove(&addr) {
+            if let Some((_, state)) = self.states.remove(&key) {
                 self.allocated_states.push(state).unwrap();
-                removed += 1;
             }
         }
-
-        self.in_flight_count.fetch_sub(removed, Ordering::Relaxed);
     }
 }
 
@@ -181,11 +283,8 @@ impl PortAdapter for PmapPortAdapter {
             seed_ports
         ).await.context("building graph")?;
 
-        let timeout = shared.config.strategy.timeout;
-        let max_in_flight = (shared.config.strategy.max_rate
-            * timeout.as_secs_f64()
-            * 1.5)
-            .round() as usize;
+        let max_in_flight = shared.config.strategy.max_in_flight;
+        debug!("memory to be allocated for strategy = {}MB", max_in_flight * size_of::<State>() / (1024 * 1024));
 
         let allocated_states = ArrayQueue::new(max_in_flight);
         for _ in 0..max_in_flight {
@@ -193,11 +292,7 @@ impl PortAdapter for PmapPortAdapter {
         }
 
         Ok(Self {
-            pending: SegQueue::new(),
-
             states: DashMap::with_capacity_and_hasher(max_in_flight, Default::default()),
-            expiries: SegQueue::new(),
-
             allocated_states,
 
             graph,
@@ -205,68 +300,27 @@ impl PortAdapter for PmapPortAdapter {
             epsilon: shared.config.strategy.epsilon.port,
             budget_per_address: shared.config.strategy.budget_per_address as usize,
             source_port: shared.config.controller.source_port,
-            timeout,
-
-            in_flight_count: AtomicUsize::new(0),
-
-            max_in_flight,
+            timeout: shared.timeout
         })
     }
 
     #[inline]
-    fn enqueue(&self, addr: Ipv4Addr, now: Instant, rng: &mut impl rand::Rng) {
-        let mut state = self.allocated_states.pop().unwrap();
-
-        let explore = rng.random_range::<f64, _>(0f64..=1f64) < self.epsilon;
-        let (port, state) = if explore {
-            state.clear(0, self.budget_per_address);
-
-            (
-                self.graph.explore_empty(rng),
-                state
-            )
-        } else {
-            state.clear(1, self.budget_per_address);
-
-            (
-                self.graph.recommend_at(0)
-                    .unwrap_or_else(|| self.graph.explore_empty(rng)),
-                state
-            )
-        };
-
-        self.states.insert(addr, state);
-        self.expiries.push((now.add(self.timeout), addr));
-
-        let source_port = self.source_port.sample(rng);
-        self.pending.push((source_port, addr, port));
-
-        self.in_flight_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    fn on_result(&self, addr: Ipv4Addr, port: u16, hash: Option<u64>, rng: &mut impl rand::Rng) {
-        let Some(mut state) = self.states.get_mut(&addr) else {
-            return
-        };
-
+    fn on_result(&self, addr: Ipv4Addr, port: u16, hash: Option<u64>, rng: &mut impl rand::Rng) -> Option<PacketTemplate> {
+        let mut state = self.states.get_mut(&addr)?;
         if state.tried_ports.contains(&port) {
-            return;
+            return None;
         }
 
         match hash {
             Some(hash) => {
-                if state.record_banner(&self.graph, port, hash) {
+                let honeypot = state.record_hit(&self.graph, port, hash);
+                if honeypot {
                     info!("suspected honeypot, abandoning remaining budget for {addr}:{port}");
 
                     drop(state);
+                    self.remove_state(&addr);
 
-                    if let Some((_, state)) = self.states.remove(&addr) {
-                        self.allocated_states.push(state).unwrap();
-                        self.in_flight_count.fetch_sub(1, Ordering::Relaxed);
-                    }
-
-                    return;
+                    return None;
                 }
             },
 
@@ -276,13 +330,9 @@ impl PortAdapter for PmapPortAdapter {
         state.budget_remaining = state.budget_remaining.saturating_sub(1);
         if state.budget_remaining == 0 {
             drop(state);
+            self.remove_state(&addr);
 
-            if let Some((_, state)) = self.states.remove(&addr) {
-                self.allocated_states.push(state).unwrap();
-                self.in_flight_count.fetch_sub(1, Ordering::Relaxed);
-            }
-
-            return;
+            return None;
         }
 
         let explore = rng.random_range::<f64, _>(0f64..=1f64) < self.epsilon;
@@ -295,49 +345,38 @@ impl PortAdapter for PmapPortAdapter {
 
         let Some(next_port) = next else {
             drop(state);
+            self.remove_state(&addr);
 
-            if let Some((_, state)) = self.states.remove(&addr) {
-                self.allocated_states.push(state).unwrap();
-                self.in_flight_count.fetch_sub(1, Ordering::Relaxed);
-            }
-
-            return;
+            return None;
         };
 
         drop(state);
 
         let source_port = self.source_port.sample(rng);
-        self.pending.push((source_port, addr, next_port));
+        Some(PacketTemplate::new(source_port, addr, next_port))
     }
 
-    #[inline]
-    fn create_expirer(&self) -> impl PortExpirer {
-        PmapExpirer {
-            in_flight_count: &self.in_flight_count,
-            allocated_states: &self.allocated_states,
+    #[inline(always)]
+    fn guard(&self) -> impl PortGuard {
+        PmapPortGuard {
             states: &self.states,
-            expiries: &self.expiries,
-            pending: None,
+            allocated_states: &self.allocated_states,
+            expiries: Worker::new(),
+            graph: &self.graph,
+
+            timeout: self.timeout,
+            source_port: self.source_port,
+            epsilon: self.epsilon,
+            budget_per_address: self.budget_per_address,
         }
     }
+}
 
-    #[inline(always)]
-    fn length(&self) -> usize {
-        self.in_flight_count.load(Ordering::Relaxed)
-    }
-
-    #[inline(always)]
-    fn capacity(&self) -> usize {
-        self.max_in_flight
-    }
-
+impl PmapPortAdapter {
     #[inline]
-    fn recv_into(&self, vec: &mut Vec<(u16, Ipv4Addr, u16)>, batch_size: usize) {
-        for _ in 0..batch_size {
-            match self.pending.pop() {
-                Some(pending) => vec.push(pending),
-                None => break
-            }
+    pub(crate) fn remove_state(&self, addr: &Ipv4Addr) {
+        if let Some((_, state)) = self.states.remove(addr) {
+            self.allocated_states.push(state).unwrap();
         }
     }
 }
