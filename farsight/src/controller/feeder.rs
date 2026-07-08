@@ -3,6 +3,7 @@ use crate::controller::strategy::port::{Expiry, PortBatcher, PortGenerationGuard
 use crate::controller::strategy::port::PortGenerator;
 use std::time::{Duration, Instant};
 use crossbeam_epoch::Guard;
+use crossbeam_utils::Backoff;
 use rand::{SeedableRng};
 use rand_xoshiro::{Xoshiro256Plus};
 use crate::controller::shared::SharedData;
@@ -23,10 +24,16 @@ pub struct Feeder<'env, B: PortBatcher<'env>, A: PortGenerator, I: IpAdapter> {
     ip_adapter: &'env I,
 
     guard: Guard,
-    
+
+    rate: f64,
+    tokens: f64,
+    last_refill: Instant,
+
     batch_size: usize,
     result_batch: Vec<PacketTemplate>,
-    expiries_batch: Vec<Expiry>
+    expiries_batch: Vec<Expiry>,
+
+    backoff: Backoff
 }
 
 impl<'env, B: PortBatcher<'env>, A: PortGenerator, I: IpAdapter> Feeder<'env, B, A, I> {
@@ -40,7 +47,7 @@ impl<'env, B: PortBatcher<'env>, A: PortGenerator, I: IpAdapter> Feeder<'env, B,
         ip_adapter: &'env I
     ) -> Self {
         let batch_size = shared.config.session.batch_size;
-        
+
         Self {
             rng: Xoshiro256Plus::seed_from_u64(seed),
             index: 0,
@@ -56,9 +63,15 @@ impl<'env, B: PortBatcher<'env>, A: PortGenerator, I: IpAdapter> Feeder<'env, B,
             port_guard,
             ip_adapter,
 
+            rate: shared.config.controller.max_rate * 1.5,
+            tokens: 0.0,
+            last_refill: Instant::now(),
+
             batch_size,
             result_batch: Vec::with_capacity(batch_size),
-            expiries_batch: Vec::with_capacity(batch_size)
+            expiries_batch: Vec::with_capacity(batch_size),
+
+            backoff: Backoff::new()
         }
     }
 
@@ -75,8 +88,12 @@ impl<'env, B: PortBatcher<'env>, A: PortGenerator, I: IpAdapter> Feeder<'env, B,
         let timeout = now.add(self.timeout);
         for _ in 0..self.batch_size {
             let Some(guard) = self.port_guard.guard() else {
+                self.backoff.snooze();
+
                 continue;
             };
+
+            self.backoff.reset();
 
             let addr = match self.ip_adapter.next_address(&mut self.index, &mut self.rng) {
                 Some(addr) => addr,

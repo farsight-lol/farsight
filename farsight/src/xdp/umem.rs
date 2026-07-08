@@ -1,17 +1,19 @@
 use crate::xdp::ring::Descriptor;
 use anyhow::{bail, Context};
-use libc::{xsk_tx_metadata, XDP_UMEM_TX_METADATA_LEN};
+use libc::{mmap, munmap, xsk_tx_metadata, MAP_ANONYMOUS, MAP_FAILED, MAP_HUGETLB, MAP_PRIVATE, PROT_READ, PROT_WRITE, XDP_UMEM_TX_METADATA_LEN};
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
     slice::from_raw_parts_mut,
 };
+use std::ptr::null_mut;
 use log::info;
+use crate::xdp::page::{align_to_hugepage, align_to_page};
 use crate::xdp::socket::Socket;
 use crate::xdp::tx_metadata::TxMetadata;
 
 pub struct Umem {
     area: *mut u8,
-    layout: Layout,
+    size: usize,
 
     frame_size: u32,
 }
@@ -27,20 +29,36 @@ impl Umem {
     pub fn new(
         frame_size: u32,
         frame_count: u32,
+        huge_pages: bool,
     ) -> Result<Self, anyhow::Error> {
-        let layout = Layout::from_size_align(
-            frame_size.saturating_mul(frame_count) as usize,
-            16384,
-        ).context("creating umem layout")?;
+        let size;
 
-        let area = unsafe { alloc_zeroed(layout) };
-        if area.is_null() {
+        let mut flags = MAP_PRIVATE | MAP_ANONYMOUS;
+        if huge_pages {
+            size = align_to_hugepage(frame_size.saturating_mul(frame_count) as usize);
+            flags |= MAP_HUGETLB;
+        } else {
+            size = align_to_page(frame_size.saturating_mul(frame_count) as usize);
+        }
+
+        let area = unsafe {
+            mmap(
+                null_mut(),
+                size,
+                PROT_WRITE | PROT_READ,
+                flags,
+                -1,
+                0
+            )
+        };
+
+        if area == MAP_FAILED {
             bail!("allocating umem area")
         }
 
         Ok(Self {
-            area,
-            layout,
+            area: area as *mut _,
+            size,
 
             frame_size,
         })
@@ -71,7 +89,7 @@ impl Umem {
     pub fn as_reg(&self) -> UmemReg {
         UmemReg {
             addr: self.area as u64,
-            len: self.layout.size() as u64,
+            len: self.size as u64,
             frame_size: self.frame_size,
             headroom: 0,
             flags: XDP_UMEM_TX_METADATA_LEN,
@@ -99,7 +117,7 @@ impl Drop for Umem {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            dealloc(self.area, self.layout);
+            munmap(self.area as *mut _, self.size);
         }
     }
 }

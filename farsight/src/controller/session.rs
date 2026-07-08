@@ -14,6 +14,8 @@ use std::marker::PhantomData;
 use std::ops::{Add, Sub};
 use std::time::Instant;
 use anyhow::{anyhow, bail, Context};
+use core_affinity::CoreId;
+use crossbeam_utils::Backoff;
 use futures::executor::block_on;
 use log::{debug, error, info};
 use rand::{random, SeedableRng};
@@ -102,7 +104,11 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter> Session<'umem, 'env, A, I>
         let rate_per_completer = self.shared.config.controller.max_rate / self.saturators.len() as f64;
 
         thread::scope(|scope| {
+            core_affinity::set_for_current(CoreId { id: 0 });
+
             scope.spawn(|| {
+                core_affinity::set_for_current(CoreId { id: 1 });
+
                 let future = spawn_printer_and_database(
                     self.shared.clone(),
                     self.database,
@@ -120,37 +126,47 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter> Session<'umem, 'env, A, I>
             });
 
             let handles: Vec<_> = self.saturators.drain(..)
-                .map(|(sender, (receiver, sender_responder, cr))| {
+                .enumerate()
+                .map(|(i, (sender, (receiver, sender_responder, cr)))| {
+                    let shared = self.shared.clone();
+                    let port_adapter = &port_adapter;
+                    let ip_adapter = &ip_adapter;
+                    let filled = &filled;
+                    let completed = &completed;
+                    let done = &done;
+
                     let stealer = port_batcher.stealer();
                     let queue = queue.clone();
-                    scope.spawn(|| spawn_saturator(
-                        Scanner::new(
-                            sender,
-                            seed,
-                            stealer,
-                        ),
 
-                        Responder::new(
-                            receiver,
-                            sender_responder,
-                            &port_adapter,
-                            &ip_adapter,
-                            payload,
-                            parser,
-                            &filled,
-                            seed,
-                        ),
+                    scope.spawn(move || {
+                        core_affinity::set_for_current(CoreId { id: i + 2 });
 
-                        Completer::new(
-                            self.shared.clone(),
-                            cr,
-                            rate_per_completer,
-                            &completed
-                        ),
-
-                        &done,
-                        queue
-                    ))
+                        spawn_saturator(
+                            Scanner::new(
+                                sender,
+                                seed,
+                                stealer,
+                            ),
+                            Responder::new(
+                                receiver,
+                                sender_responder,
+                                port_adapter,
+                                ip_adapter,
+                                payload,
+                                parser,
+                                filled,
+                                seed,
+                            ),
+                            Completer::new(
+                                shared,
+                                cr,
+                                rate_per_completer,
+                                completed,
+                            ),
+                            done,
+                            queue,
+                        )
+                    })
                 }).collect();
 
             drop(queue);
@@ -169,6 +185,7 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter> Session<'umem, 'env, A, I>
                     break;
                 }
             }
+
             debug!("finished session");
 
             done.store(true, Ordering::Release);
@@ -280,21 +297,39 @@ fn spawn_saturator<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, P: Parser>(
     done: &'b AtomicBool,
     queue: UnboundedSender<Scanling<P>>
 ) -> (Sender<'umem>, DestructedResponder<'umem>) {
+    let backoff = Backoff::new();
     loop {
-        if let Some(error) = scanner.tick(&mut completer) {
-            error!("{error:?}");
+        let mut progressed = false;
+
+        match scanner.tick(&mut completer) {
+            Some(error) => {
+                error!("{error:?}");
+            }
+            None => progressed = true
         }
 
         let result = responder.tick(&mut completer);
-        if let Err(err) = result {
-            error!("failed to tick receiver: {}", err);
+        match result {
+            Err(err) => {
+                error!("failed to tick receiver: {}", err);
+            }
+
+            Ok(Some(())) => {
+                progressed = true;
+            }
+
+            _ => {}
         }
 
         for scanling in responder.scanlings.drain(..) {
             _ = queue.send(scanling);
         }
 
-        completer.tick();
+        if completer.tick().is_some() {
+            progressed = true;
+        }
+
+        if progressed { backoff.reset() } else { backoff.snooze() }
 
         if done.load(Ordering::Acquire) {
             break

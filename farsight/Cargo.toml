@@ -38,6 +38,7 @@ rtnetlink = "0.21"
 surge-ping = "0.8"
 futures = "0.3"
 zerocopy = { version = "0.8", features = ["derive"] }
+core_affinity = "0.8"
 
 [build-dependencies]
 aya-build = { git = "https://github.com/aya-rs/aya" }

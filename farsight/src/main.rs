@@ -76,7 +76,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     debug!("usable queue count = {}", usable_queue_count);
     if usable_queue_count < queue_count {
-        warn!(
+        bail!(
               "NIC reports {} queues but only using {} to leave cores free for management/db; \
               consider 'ethtool -L {} combined {}' to match",
               queues.max.combined, queues.current.combined, config.controller.interface, usable_queue_count
@@ -127,6 +127,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .map(|_| Umem::new(
             2048,
             3 * config.xdp.ring_size,
+            config.xdp.huge_pages
         ).context("creating umem"))
         .collect::<Result<Box<[_]>, _>>()?;
 

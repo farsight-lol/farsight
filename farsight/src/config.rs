@@ -179,6 +179,7 @@ impl XdpAttachMode {
 pub struct XdpConfig {
     pub mode: XdpMode,
     pub attach_mode: XdpAttachMode,
+    pub huge_pages: bool,
     pub checksum_offload: bool,
 
     pub ring_size: u32,

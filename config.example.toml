@@ -133,6 +133,16 @@ attach_mode = "skb"
 # false = fast
 checksum_offload = false
 
+# we allocate a block of memory to store packets.
+# using huge pages may make the access to that block of memory faster, therefore improving performance.
+# to enable huge pages, run the following:
+# ```
+# echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+# sudo sysctl -w vm.nr_hugepages=10240
+# sudo sysctl -p
+# ```
+huge_pages = false
+
 # ring sizes, change only if you know what you're doing.
 # higher values increase memory usage, but it also may improve performance.
 ring_size = 2048

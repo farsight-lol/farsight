@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Instant};
 use crate::controller::shared::SharedData;
 use crate::xdp::ring::Consumer;
 
@@ -36,39 +35,37 @@ impl<'b> Completer<'b> {
     }
 
     #[inline]
-    pub(super) fn tick(&mut self) {
+    pub(super) fn tick(&mut self) -> Option<()> {
         let batch = self.next_batch();
         if let Some((_, count)) = self.cr.peek(batch) {
             self.cr.release(count);
 
             self.completed.fetch_add(count as usize, Ordering::Relaxed);
             self.tokens += (batch - count) as f64;
-        } else { self.tokens += batch as f64; }
+
+            Some(())
+        } else {
+            self.tokens += batch as f64;
+
+            None
+        }
     }
 
     #[inline]
     fn next_batch(&mut self) -> u32 {
-        loop {
-            let now = Instant::now();
-            let elapsed = (now - self.last_refill).as_secs_f64();
-            self.last_refill = now;
+        let now = Instant::now();
+        let elapsed = (now - self.last_refill).as_secs_f64();
+        self.last_refill = now;
 
-            self.tokens = (self.tokens + elapsed * self.rate).min(self.batch_size as f64);
-
-            if self.tokens < 1.0 {
-                let need = 1.0 - self.tokens;
-                let wait = (need / self.rate).min(0.1);
-
-                thread::sleep(Duration::from_secs_f64(wait));
-
-                continue;
-            }
-
-            let take = self.tokens.floor();
-            self.tokens -= take;
-
-            return take as u32;
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.batch_size as f64);
+        if self.tokens < 1.0 {
+            return 0;
         }
+
+        let take = self.tokens.floor();
+        self.tokens -= take;
+
+        take as u32
     }
 
     #[inline]

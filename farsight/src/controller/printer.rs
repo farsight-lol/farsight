@@ -1,4 +1,4 @@
-use log::{info, trace};
+use log::{debug, info, trace};
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},

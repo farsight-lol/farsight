@@ -33,7 +33,6 @@ pub struct Sender<'umem> {
 
     tx: Producer<Descriptor>,
 
-    // just a tad bit more cache friendly
     checksum_offload: bool,
 }
 

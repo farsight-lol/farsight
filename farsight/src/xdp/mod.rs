@@ -2,6 +2,7 @@ pub mod ring;
 pub mod socket;
 pub mod tx_metadata;
 pub mod umem;
+pub mod page;
 
 #[macro_export]
 macro_rules! cbail {

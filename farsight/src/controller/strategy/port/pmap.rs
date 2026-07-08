@@ -135,6 +135,7 @@ pub struct PmapPortGenerationGuard<'env> {
     state: Box<State>,
 
     states: &'env DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    allocated_states: &'env ArrayQueue<Box<State>>,
     graph: &'env PortGraph,
 
     source_port: PortRange,
@@ -155,7 +156,9 @@ impl PortGenerationGuard for PmapPortGenerationGuard<'_> {
             self.graph.explore_empty(rng)
         };
 
-        self.states.insert(addr, self.state);
+        if let Some(state) = self.states.insert(addr, self.state) {
+            self.allocated_states.push(state).unwrap();
+        }
 
         let source_port = self.source_port.sample(rng);
         PacketTemplate::new(source_port, addr, port)
@@ -179,6 +182,7 @@ impl PortGenerator for PmapPortGenerator<'_> {
             state: self.allocated_states.pop()?,
 
             states: self.states,
+            allocated_states: self.allocated_states,
             graph: self.graph,
 
             source_port: self.source_port,

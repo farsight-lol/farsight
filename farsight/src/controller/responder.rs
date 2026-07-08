@@ -28,6 +28,9 @@ use crate::controller::strategy::port::PortAdapter;
 use crate::net::tcp::TcpHdr;
 
 struct State {
+    ip: Ipv4Addr,
+    port: u16,
+
     data: Vec<u8>,
 
     next_expected_seq: u32,
@@ -107,7 +110,7 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Re
     }
 
     #[inline]
-    pub(super) fn tick(&'_ mut self, completer: &mut Completer) -> anyhow::Result<()> {
+    pub(super) fn tick(&'_ mut self, completer: &mut Completer) -> anyhow::Result<Option<()>> {
         let Responder {
             port_adapter,
             ip_adapter,
@@ -127,9 +130,10 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Re
             filled
         } = self;
 
+        let seed = *seed;
         {
             let Some(data_batch) = receiver.receive(filled)? else {
-                return Ok(());
+                return Ok(None);
             };
 
             for data in data_batch {
@@ -145,7 +149,7 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Re
                     data,
                     rng,
                     *timeout,
-                    *seed,
+                    seed,
                     *max_reorder_bytes,
                     *max_reorder_segments,
                     completer
@@ -172,11 +176,20 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Re
                     break;
                 }
 
-                connections.remove(&key);
+                let connection = connections.remove(&key).unwrap();
+                Self::record_empty(
+                    port_adapter,
+                    connection.ip,
+                    connection.port,
+                    seed,
+                    rng,
+                    sender,
+                    completer
+                )?;
             }
         }
 
-        Ok(())
+        Ok(Some(()))
     }
 
     #[inline]
@@ -421,6 +434,9 @@ impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Re
         connections.insert(
             (ip, port),
             State {
+                ip,
+                port,
+
                 data: Vec::new(),
 
                 next_expected_seq: seq,
