@@ -70,6 +70,7 @@ pub struct EpsilonConfig {
 pub struct SessionConfig {
     #[serde_as(as = "DurationSeconds<u64>")]
     pub duration: Duration,
+    pub batch_size: usize,
 
     pub rescan: RescanConfig
 }

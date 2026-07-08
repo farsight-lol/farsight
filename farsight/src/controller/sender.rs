@@ -19,26 +19,8 @@ use anyhow::Context;
 use log::debug;
 use zerocopy::FromBytes;
 use crate::controller::completer::Completer;
+use crate::net::tcp::PacketTemplate;
 use crate::xdp::umem::Umem;
-
-#[derive(Debug)]
-pub struct PacketTemplate {
-    source_port: u16,
-
-    ip: Ipv4Addr,
-    destination_port: u16,
-}
-
-impl PacketTemplate {
-    #[inline]
-    pub fn new(source_port: u16, ip: Ipv4Addr, destination_port: u16) -> Self {
-        Self {
-            source_port,
-            ip,
-            destination_port
-        }
-    }
-}
 
 pub struct Sender<'umem> {
     tcp_checksum: u32,

@@ -90,8 +90,12 @@ timeout_batch = 4096
 catchall_threshold = 5
 
 [session]
-# how much each session lasts at max in seconds
+# how much each session lasts at max in seconds.
 duration = 300
+
+# how many targets we generate at once & send off to the adapters.
+# tune however you'd like.
+batch_size = 16
 
 rescan = {
     # how many ips at max get queued to be scanned in every rescan session.

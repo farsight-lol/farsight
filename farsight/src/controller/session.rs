@@ -1,4 +1,5 @@
-use crate::controller::strategy::port::PortGuard;
+use crate::controller::strategy::port::PortBatcher;
+use crate::controller::strategy::port::{Expiry, PortGuard};
 use crate::{
     controller::{
         completer::Completer, printer::Printer, scanner::Scanner,
@@ -13,7 +14,6 @@ use std::marker::PhantomData;
 use std::ops::{Add, Sub};
 use std::time::Instant;
 use anyhow::{anyhow, bail, Context};
-use crossbeam_queue::{ArrayQueue, SegQueue};
 use futures::executor::block_on;
 use log::{debug, error, info};
 use rand::{random, SeedableRng};
@@ -22,6 +22,7 @@ use tokio::{runtime, select};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{interval, MissedTickBehavior};
+use crate::controller::deque::worker::Worker;
 use crate::controller::DestructedResponder;
 use crate::controller::feeder::Feeder;
 use crate::controller::protocol::{Parser, Payload};
@@ -29,25 +30,25 @@ use crate::controller::receiver::Receiver;
 use crate::controller::responder::Responder;
 use crate::controller::strategy::ip::IpAdapter;
 use crate::controller::strategy::port::{PortExpirer, PortAdapter};
-use crate::controller::worker::Worker;
 use crate::database::{Database, Scanling};
+use crate::net::tcp::PacketTemplate;
 use crate::xdp::ring::Consumer;
 
-pub struct Session<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> {
+pub struct Session<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter> {
     shared: SharedData,
-    database: &'b mut Database,
-    saturators: &'b mut Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
+    database: &'env mut Database,
+    saturators: &'env mut Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
     ranges: CompiledRanges,
 
-    _phantom: PhantomData<(&'b A, &'b I)>,
+    _phantom: PhantomData<(&'env A, &'env I)>,
 }
 
-impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
+impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter> Session<'umem, 'env, A, I> {
     #[inline]
     pub(super) async fn new(
         shared: SharedData,
-        database: &'b mut Database,
-        saturators: &'b mut Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
+        database: &'env mut Database,
+        saturators: &'env mut Vec<(Sender<'umem>, DestructedResponder<'umem>)>,
         ranges: CompiledRanges,
     ) -> Result<Self, anyhow::Error> {
         Ok(Self {
@@ -71,6 +72,8 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
         info!("starting session");
 
         let completed = AtomicUsize::new(0);
+        let filled = AtomicUsize::new(0);
+
         let done = AtomicBool::new(false);
 
         let (queue, receiver) = mpsc::unbounded_channel();
@@ -87,6 +90,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
         let port_guard = port_adapter.guard();
         let port_expirer = port_guard.expirer(self.shared.config.strategy.timeout_batch);
         let port_generator = port_guard.generator();
+        let port_batcher = port_guard.batcher();
 
         let ip_adapter = I::new(
             self.shared.clone(),
@@ -95,7 +99,6 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
             seed
         ).await.context("creating ip adapter")?;
 
-        let template_queue = Worker::new();
         let rate_per_completer = self.shared.config.controller.max_rate / self.saturators.len() as f64;
 
         thread::scope(|scope| {
@@ -105,6 +108,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
                     self.database,
                     port_expirer,
                     &completed,
+                    &filled,
                     receiver
                 );
 
@@ -117,7 +121,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
 
             let handles: Vec<_> = self.saturators.drain(..)
                 .map(|(sender, (receiver, sender_responder, cr))| {
-                    let stealer = template_queue.stealer();
+                    let stealer = port_batcher.stealer();
                     let queue = queue.clone();
                     scope.spawn(|| spawn_saturator(
                         Scanner::new(
@@ -133,7 +137,8 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
                             &ip_adapter,
                             payload,
                             parser,
-                            seed
+                            &filled,
+                            seed,
                         ),
 
                         Completer::new(
@@ -151,9 +156,10 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter> Session<'umem, 'b, A, I> {
             drop(queue);
 
             let mut feeder = Feeder::new(
+                self.shared.clone(),
                 seed,
                 duration,
-                &template_queue,
+                port_batcher,
                 port_generator,
                 &ip_adapter
             );
@@ -184,6 +190,7 @@ async fn spawn_printer_and_database(
     database: &mut Database,
     mut expirer: impl PortExpirer,
     completed: &AtomicUsize,
+    filled: &AtomicUsize,
     mut queue: UnboundedReceiver<Scanling<impl Parser + 'static>>
 ) {
     let flush_interval = shared.config.database.flush_interval;
@@ -192,7 +199,11 @@ async fn spawn_printer_and_database(
     let mut batch = Vec::with_capacity(flush_capacity);
 
     let mut last_flush = Instant::now();
-    let mut printer = Printer::new(completed, shared.config.controller.print_every);
+    let mut printer = Printer::new(
+        completed,
+        filled,
+        shared.config.controller.print_every
+    );
 
     let mut write_task = None;
 

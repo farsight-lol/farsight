@@ -9,6 +9,7 @@ use anyhow::{bail, Context};
 use libc::{XSK_UNALIGNED_BUF_ADDR_MASK, XSK_UNALIGNED_BUF_OFFSET_SHIFT};
 use std::slice::{from_raw_parts, from_raw_parts_mut};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use log::error;
 use crate::xdp::umem::Umem;
 
@@ -48,13 +49,13 @@ impl<'umem> Receiver<'umem> {
 
             fr,
             rx,
-            
+
             batch_size: shared.config.xdp.batches.rx
         })
     }
 
     #[inline]
-    pub(super) fn receive(&mut self) -> Result<Option<BatchGuard<'umem, '_>>, anyhow::Error> {
+    pub(super) fn receive<'scope>(&'scope mut self, filled: &'scope AtomicUsize) -> Result<Option<BatchGuard<'umem, 'scope>>, anyhow::Error> {
         let Some((rx_start, count)) = self.rx.peek(self.batch_size) else {
             return Ok(None);
         };
@@ -77,19 +78,22 @@ impl<'umem> Receiver<'umem> {
             rx: &self.rx,
             socket: self.socket.clone(),
 
+            filled,
             rx_start,
             fill_start,
             count,
+
             cursor: 0,
         }))
     }
 }
 
-pub(super) struct BatchGuard<'umem: 'c, 'c> {
+pub(super) struct BatchGuard<'umem: 'scope, 'scope> {
     umem: &'umem Umem,
-    fr: &'c mut Producer<u64>,
-    rx: &'c Consumer<Descriptor>,
+    fr: &'scope mut Producer<u64>,
+    rx: &'scope Consumer<Descriptor>,
     socket: Socket,
+    filled: &'scope AtomicUsize,
 
     rx_start: u32,
     fill_start: u32,
@@ -97,8 +101,8 @@ pub(super) struct BatchGuard<'umem: 'c, 'c> {
     cursor: u32,
 }
 
-impl<'umem: 'c, 'c> Iterator for BatchGuard<'umem, 'c> {
-    type Item = &'c mut [u8];
+impl<'umem: 'scope, 'scope> Iterator for BatchGuard<'umem, 'scope> {
+    type Item = &'scope mut [u8];
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -136,6 +140,8 @@ impl<'umem: 'c, 'c> Drop for BatchGuard<'umem, 'c> {
 
         self.rx.release(self.count);
         self.fr.submit(self.count);
+
+        self.filled.fetch_add(self.cursor as usize, Ordering::Relaxed);
 
         if self.fr.flags().needs_wakeup() && self.socket.recvfrom().is_err() {
             error!("kicking fill ring")

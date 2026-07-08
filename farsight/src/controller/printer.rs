@@ -4,28 +4,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct Printer<'b> {
-    completed: &'b AtomicUsize,
+pub(super) struct Printer<'env> {
+    completed: &'env AtomicUsize,
+    filled: &'env AtomicUsize,
 
     print_every: Duration,
 
     last: Instant,
-    last_comp: usize,
 }
 
 impl<'b> Printer<'b> {
     #[inline]
     pub(super) fn new(
         completed: &'b AtomicUsize,
+        filled: &'b AtomicUsize,
         print_every: Duration,
     ) -> Self {
         Self {
             completed,
+            filled,
 
             print_every,
 
             last: Instant::now(),
-            last_comp: 0,
         }
     }
 
@@ -36,20 +37,32 @@ impl<'b> Printer<'b> {
             return;
         }
 
-        let comp = self.completed.load(Ordering::Relaxed);
-        let pps = (comp - self.last_comp) as f64 / elapsed.as_secs_f64();
+        let comp = self.completed.swap(0, Ordering::Relaxed);
+        {
+            let pps = comp as f64 / elapsed.as_secs_f64();
+            if pps > 10_000_000. {
+                info!("tx: {} mpps", (pps / 1_000_000.).round() as u64)
+            } else if pps > 10_000. {
+                info!("tx: {} kpps", (pps / 1_000.).round() as u64)
+            } else {
+                info!("tx: {} pps", pps.round() as u64)
+            };
+        }
 
-        if pps > 10_000_000. {
-            info!("{} mpps", (pps / 1_000_000.).round() as u64)
-        } else if pps > 10_000. {
-            info!("{} kpps", (pps / 1_000.).round() as u64)
-        } else {
-            info!("{} pps", pps.round() as u64)
-        };
+        let fill = self.filled.swap(0, Ordering::Relaxed);
+        {
+            let pps = fill as f64 / elapsed.as_secs_f64();
+            if pps > 10_000_000. {
+                info!("rx: {} mpps", (pps / 1_000_000.).round() as u64)
+            } else if pps > 10_000. {
+                info!("rx: {} kpps", (pps / 1_000.).round() as u64)
+            } else {
+                info!("rx: {} pps", pps.round() as u64)
+            };
+        }
 
         trace!("total completed: {comp}");
 
-        self.last_comp = comp;
         self.last = now;
     }
 }

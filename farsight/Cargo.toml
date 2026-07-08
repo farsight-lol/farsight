@@ -44,6 +44,9 @@ aya-build = { git = "https://github.com/aya-rs/aya" }
 anyhow = "1"
 farsight-ebpf = { path = "../farsight-ebpf" }
 
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Clink-arg=-Wl,--no-rosegment"]
+
 [[bin]]
 name = "farsight"
 path = "src/main.rs"

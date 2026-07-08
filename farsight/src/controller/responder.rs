@@ -17,6 +17,7 @@ use log::{debug, error, trace};
 use std::{net::Ipv4Addr, time::{Duration, Instant}};
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::{Add, Sub};
+use std::sync::atomic::AtomicUsize;
 use anyhow::{bail};
 use rand::{random, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -47,6 +48,7 @@ pub(super) struct Responder<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Pay
 
     payload: &'b PA,
     parser: &'b P,
+    filled: &'b AtomicUsize,
 
     receiver: Receiver<'umem>,
     sender: Sender<'umem>,
@@ -65,15 +67,16 @@ pub(super) struct Responder<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Pay
     timeout: Duration,
 }
 
-impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Responder<'umem, 'b, A, I, PA, P> {
+impl<'umem: 'env, 'env, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Responder<'umem, 'env, A, I, PA, P> {
     #[inline]
     pub(super) fn new(
         receiver: Receiver<'umem>,
         sender: Sender<'umem>,
-        port_adapter: &'b A,
-        ip_adapter: &'b I,
-        payload: &'b PA,
-        parser: &'b P,
+        port_adapter: &'env A,
+        ip_adapter: &'env I,
+        payload: &'env PA,
+        parser: &'env P,
+        filled: &'env AtomicUsize,
         seed: u64
     ) -> Self {
         Self {
@@ -94,6 +97,7 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
             receiver,
 
             sender,
+            filled,
 
             connections: FxHashMap::default(),
 
@@ -119,32 +123,35 @@ impl<'umem: 'b, 'b, A: PortAdapter, I: IpAdapter, PA: Payload, P: Parser> Respon
             seed,
             timeout,
             expiries,
-            pending_expiry
+            pending_expiry,
+            filled
         } = self;
 
-        let Some(data_batch) = receiver.receive()? else {
-            return Ok(());
-        };
+        {
+            let Some(data_batch) = receiver.receive(filled)? else {
+                return Ok(());
+            };
 
-        for data in data_batch {
-            if let Err(err) = Self::process_packet(
-                port_adapter,
-                ip_adapter,
-                payload,
-                parser,
-                sender,
-                connections,
-                expiries,
-                scanlings,
-                data,
-                rng,
-                *timeout,
-                *seed,
-                *max_reorder_bytes,
-                *max_reorder_segments,
-                completer
-            ) {
-                error!("error ticking controller: {:?}", err);
+            for data in data_batch {
+                if let Err(err) = Self::process_packet(
+                    port_adapter,
+                    ip_adapter,
+                    payload,
+                    parser,
+                    sender,
+                    connections,
+                    expiries,
+                    scanlings,
+                    data,
+                    rng,
+                    *timeout,
+                    *seed,
+                    *max_reorder_bytes,
+                    *max_reorder_segments,
+                    completer
+                ) {
+                    error!("error ticking controller: {:?}", err);
+                }
             }
         }
 

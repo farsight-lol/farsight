@@ -10,7 +10,7 @@ pub mod strategy;
 pub mod protocol;
 pub mod session;
 pub mod feeder;
-pub mod worker;
+pub mod deque;
 
 use crate::{
     config::{
@@ -34,21 +34,13 @@ use crate::{
 use anyhow::{anyhow, bail, Context};
 use aya::{maps::XskMap, programs::Xdp, Ebpf};
 use log::{debug, error, info, warn};
-use rand::random;
-use serde::Serialize;
-use std::{cell::RefCell, hint, marker::PhantomData, mem, ops::{DerefMut, RangeInclusive}, ptr, sync::{
+use std::{hint, marker::PhantomData, mem, ops::{DerefMut, RangeInclusive}, ptr, sync::{
     atomic::{AtomicBool, Ordering}, mpsc,
     Arc,
     Mutex,
 }, thread, thread::{Builder, JoinHandle, Scope}, time::{Duration, Instant}};
-use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
-use std::rc::Rc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::RwLock;
-use crossbeam_queue::SegQueue;
-use crate::config::{Config, PingConfig, StrategyConfig};
-use crate::controller::printer::Printer;
+use crate::config::{Config, StrategyConfig};
 use crate::controller::strategy::ip::IpAdapter;
 use crate::controller::strategy::port::PortAdapter;
 use crate::controller::strategy::selector::Selector;

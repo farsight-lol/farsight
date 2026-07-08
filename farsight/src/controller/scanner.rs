@@ -3,25 +3,25 @@ use crate::{
 };
 use crossbeam_epoch::Guard;
 use crate::controller::completer::Completer;
-use crate::controller::sender::PacketTemplate;
-use crate::controller::worker::{Steal, Stealer};
+use crate::controller::deque::stealer::{Steal, Stealer};
+use crate::net::tcp::PacketTemplate;
 
-pub(super) struct Scanner<'umem: 'b, 'b> {
+pub(super) struct Scanner<'umem: 'env, 'env> {
     sender: Sender<'umem>,
     seed: u64,
 
     targets: Vec<PacketTemplate>,
-    stealer: Stealer<'b, PacketTemplate>,
-    
+    stealer: Stealer<'env, PacketTemplate>,
+
     guard: Guard
 }
 
-impl<'umem: 'b, 'b> Scanner<'umem, 'b> {
+impl<'umem: 'env, 'env> Scanner<'umem, 'env> {
     #[inline]
     pub(super) fn new(
         sender: Sender<'umem>,
         seed: u64,
-        stealer: Stealer<'b, PacketTemplate>
+        stealer: Stealer<'env, PacketTemplate>
     ) -> Self {
         Self {
             targets: Vec::with_capacity(sender.shared.config.xdp.ring_size as usize),
@@ -30,7 +30,7 @@ impl<'umem: 'b, 'b> Scanner<'umem, 'b> {
             seed,
 
             stealer,
-            
+
             guard: crossbeam_epoch::pin()
         }
     }

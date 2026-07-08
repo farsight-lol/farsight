@@ -4,25 +4,26 @@ use std::hint::likely;
 use std::mem;
 use crate::config::PortRange;
 use crate::controller::shared::SharedData;
-use crossbeam_queue::{ArrayQueue, SegQueue};
+use crossbeam_queue::{ArrayQueue};
 use dashmap::DashMap;
 use rand::{RngExt};
 use std::net::Ipv4Addr;
 use std::ops::{Add, Deref, Sub};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use crossbeam_epoch::Guard;
-use crate::controller::worker::{Steal, Stealer, Worker};
 use fxhash::{FxBuildHasher, FxHashMap};
 use log::{debug, info, trace};
-use crate::controller::sender::PacketTemplate;
+use crate::controller::deque::stealer::{Steal, Stealer};
+use crate::controller::deque::worker::Worker;
 use crate::controller::strategy::pmap::graph::banner::PortGraph;
 use crate::controller::strategy::pmap::heap::LazyHeap;
-use crate::controller::strategy::port::{PortExpirer, PortAdapter, PortGuard, PortGenerator, PortGenerationGuard};
+use crate::controller::strategy::port::{PortExpirer, PortAdapter, PortGuard, PortGenerator, PortGenerationGuard, Expiry, PortBatcher};
 use crate::database::Database;
+use crate::net::tcp::PacketTemplate;
 
 pub struct PmapPortAdapter {
     states: DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
@@ -32,8 +33,7 @@ pub struct PmapPortAdapter {
 
     epsilon: f64,
     budget_per_address: usize,
-    source_port: PortRange,
-    timeout: Duration,
+    source_port: PortRange
 }
 
 #[derive(Default, Debug)]
@@ -131,14 +131,12 @@ impl State {
     }
 }
 
-pub struct PmapPortGenerationGuard<'b> {
+pub struct PmapPortGenerationGuard<'env> {
     state: Box<State>,
 
-    states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
-    expiries: &'b Worker<(Instant, Ipv4Addr)>,
-    graph: &'b PortGraph,
+    states: &'env DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    graph: &'env PortGraph,
 
-    timeout: Duration,
     source_port: PortRange,
     epsilon: f64,
     budget_per_address: usize,
@@ -146,7 +144,7 @@ pub struct PmapPortGenerationGuard<'b> {
 
 impl PortGenerationGuard for PmapPortGenerationGuard<'_> {
     #[inline]
-    fn generate(mut self, addr: Ipv4Addr, now: Instant, rng: &mut impl rand::Rng, guard: &Guard) -> PacketTemplate {
+    fn generate(mut self, addr: Ipv4Addr, rng: &mut impl rand::Rng) -> PacketTemplate {
         let exploit = rng.random_range::<f64, _>(0f64..=1f64) >= self.epsilon;
         self.state.clear(usize::from(exploit), self.budget_per_address);
 
@@ -158,20 +156,17 @@ impl PortGenerationGuard for PmapPortGenerationGuard<'_> {
         };
 
         self.states.insert(addr, self.state);
-        self.expiries.push((now.add(self.timeout), addr), guard);
 
         let source_port = self.source_port.sample(rng);
         PacketTemplate::new(source_port, addr, port)
     }
 }
 
-pub struct PmapPortGenerator<'b> {
-    states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
-    allocated_states: &'b ArrayQueue<Box<State>>,
-    graph: &'b PortGraph,
-    expiries: &'b Worker<(Instant, Ipv4Addr)>,
+pub struct PmapPortGenerator<'env> {
+    states: &'env DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    allocated_states: &'env ArrayQueue<Box<State>>,
+    graph: &'env PortGraph,
 
-    timeout: Duration,
     source_port: PortRange,
     epsilon: f64,
     budget_per_address: usize,
@@ -184,10 +179,8 @@ impl PortGenerator for PmapPortGenerator<'_> {
             state: self.allocated_states.pop()?,
 
             states: self.states,
-            expiries: self.expiries,
             graph: self.graph,
 
-            timeout: self.timeout,
             source_port: self.source_port,
             epsilon: self.epsilon,
             budget_per_address: self.budget_per_address,
@@ -195,14 +188,37 @@ impl PortGenerator for PmapPortGenerator<'_> {
     }
 }
 
-pub struct PmapPortGuard<'b> {
-    states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
-    allocated_states: &'b ArrayQueue<Box<State>>,
-    graph: &'b PortGraph,
+pub struct PmapPortBatcher<'env> {
+    results: &'env Worker<PacketTemplate>,
+    expiries: &'env Worker<Expiry>
+}
 
-    expiries: Worker<(Instant, Ipv4Addr)>,
+impl<'env> PortBatcher<'env> for PmapPortBatcher<'env> {
+    #[inline]
+    fn batch(
+        &mut self,
+        result_batch: &[PacketTemplate],
+        expiries_batch: &[Expiry],
+        guard: &Guard
+    ) {
+        self.results.push(result_batch, guard);
+        self.expiries.push(expiries_batch, guard);
+    }
 
-    timeout: Duration,
+    #[inline(always)]
+    fn stealer(&self) -> Stealer<'env, PacketTemplate> {
+        self.results.stealer()
+    }
+}
+
+pub struct PmapPortGuard<'env> {
+    states: &'env DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    allocated_states: &'env ArrayQueue<Box<State>>,
+    graph: &'env PortGraph,
+
+    results: Worker<PacketTemplate>,
+    expiries: Worker<Expiry>,
+
     source_port: PortRange,
     epsilon: f64,
     budget_per_address: usize,
@@ -215,12 +231,18 @@ impl PortGuard for PmapPortGuard<'_> {
             states: self.states,
             allocated_states: self.allocated_states,
             graph: self.graph,
-            expiries: &self.expiries,
 
-            timeout: self.timeout,
             source_port: self.source_port,
             epsilon: self.epsilon,
             budget_per_address: self.budget_per_address,
+        }
+    }
+
+    #[inline(always)]
+    fn batcher(&'_ self) -> impl PortBatcher<'_> {
+        PmapPortBatcher {
+            results: &self.results,
+            expiries: &self.expiries,
         }
     }
 
@@ -236,16 +258,16 @@ impl PortGuard for PmapPortGuard<'_> {
     }
 }
 
-pub struct PmapPortExpirer<'s: 'b, 'b> {
-    states: &'b DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
-    allocated_states: &'b ArrayQueue<Box<State>>,
+pub struct PmapPortExpirer<'env> {
+    states: &'env DashMap<Ipv4Addr, Box<State>, FxBuildHasher>,
+    allocated_states: &'env ArrayQueue<Box<State>>,
 
-    expiries: Stealer<'s, (Instant, Ipv4Addr)>,
+    expiries: Stealer<'env, (Instant, Ipv4Addr)>,
     pending: Option<(Instant, Ipv4Addr)>,
     batch_size: usize
 }
 
-impl<'s: 'b, 'b> PortExpirer for PmapPortExpirer<'s, 'b> {
+impl<'env> PortExpirer for PmapPortExpirer<'env> {
     #[inline]
     fn expire(&mut self, now: Instant, guard: &Guard) {
         'f: for _ in 0..self.batch_size {
@@ -300,7 +322,6 @@ impl PortAdapter for PmapPortAdapter {
             epsilon: shared.config.strategy.epsilon.port,
             budget_per_address: shared.config.strategy.budget_per_address as usize,
             source_port: shared.config.controller.source_port,
-            timeout: shared.timeout
         })
     }
 
@@ -361,10 +382,10 @@ impl PortAdapter for PmapPortAdapter {
         PmapPortGuard {
             states: &self.states,
             allocated_states: &self.allocated_states,
+            results: Worker::new(),
             expiries: Worker::new(),
             graph: &self.graph,
 
-            timeout: self.timeout,
             source_port: self.source_port,
             epsilon: self.epsilon,
             budget_per_address: self.budget_per_address,

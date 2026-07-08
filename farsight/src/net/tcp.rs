@@ -72,6 +72,25 @@ pub static TCP_PACKET: [u8; 62] = [
     0x02, // sack-perm
 ];
 
+#[derive(Debug)]
+pub struct PacketTemplate {
+    pub(crate) source_port: u16,
+
+    pub(crate) ip: Ipv4Addr,
+    pub(crate) destination_port: u16,
+}
+
+impl PacketTemplate {
+    #[inline]
+    pub fn new(source_port: u16, ip: Ipv4Addr, destination_port: u16) -> Self {
+        Self {
+            source_port,
+            ip,
+            destination_port
+        }
+    }
+}
+
 // minimal (with some fields hidden) struct for writing fields to the packet above
 // since apparently it's faster than direct byte writes
 #[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Unaligned)]

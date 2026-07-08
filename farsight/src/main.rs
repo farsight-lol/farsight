@@ -1,4 +1,4 @@
-#![feature(ip_as_octets, adt_const_params, const_param_ty_trait, min_adt_const_params, likely_unlikely, core_intrinsics)]
+#![feature(ip_as_octets, adt_const_params, const_param_ty_trait, min_adt_const_params, likely_unlikely)]
 
 extern crate core;
 
