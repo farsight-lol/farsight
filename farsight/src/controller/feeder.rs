@@ -10,7 +10,7 @@ use crate::controller::shared::SharedData;
 use crate::controller::strategy::ip::IpAdapter;
 use crate::net::tcp::PacketTemplate;
 
-pub struct Feeder<'env, B: PortBatcher<'env>, A: PortGenerator, I: IpAdapter> {
+pub struct Feeder<'env, B: PortBatcher<'env>, A: PortGenerator , I: IpAdapter> {
     rng: Xoshiro256Plus,
     index: u64,
 
