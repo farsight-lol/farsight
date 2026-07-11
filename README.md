@@ -24,6 +24,7 @@ Farsight fires raw SYN packets at the entire IPv4 address space (or a subset of 
 - [Performance](#performance)
 - [Limitations and Roadmap](#limitations-and-roadmap)
 - [Ethical and Legal Use](#ethical-and-legal-use)
+- [Opting Out](#opting-out)
 - [Further Reading](#further-reading)
 - [Acknowledgments](#acknowledgments)
 
@@ -333,6 +334,10 @@ Some concrete practices, most of which Farsight already gives you the tools for:
 - Prefer status/banner-only interactions over anything resembling exploitation. Farsight's Minecraft handling only ever performs the same unauthenticated status query any Minecraft client performs before connecting; it does not attempt to log in, authenticate, or interact with a server beyond that.
 - Know your local law before scanning networks you don't own or have permission to probe. Rules around unsolicited network scanning vary significantly by country and, in some places, by network operator terms of service.
 - Consult an established ethical framework for network measurement research if you're operating this at any real scale. The Menlo Report and Partridge and Allman's "Ethical Considerations in Network Measurement Papers" (Communications of the ACM, 2016) are the two most widely cited starting points in the networking research community.
+
+## Opting Out
+
+To opt-out from the scanning ranges of mainstream Farsight; please contact me at `contact@farsight.lol`, or make a pull request modifying `exclude.conf`.
 
 ## Further Reading
 
